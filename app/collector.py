@@ -214,18 +214,22 @@ class OPNsenseCollector:
             if dt <= 0:
                 return None
 
-            bps_in  = (bytes_in  - prev_in)  * 8 / dt
-            bps_out = (bytes_out - prev_out) * 8 / dt
+            delta_in  = bytes_in  - prev_in
+            delta_out = bytes_out - prev_out
 
             # Ignore negative values (counter wrap or reset — discard this sample)
-            if bps_in < 0 or bps_out < 0:
+            if delta_in < 0 or delta_out < 0:
                 logger.warning(
                     "Interface %r: negative delta (counter reset?), discarding sample.",
                     interface,
                 )
                 return None
 
-            return bps_in, bps_out
+            bps_in  = delta_in  * 8 / dt
+            bps_out = delta_out * 8 / dt
+
+            # Return bps rates AND the raw byte deltas (used for accurate usage accounting)
+            return bps_in, bps_out, delta_in, delta_out
 
         except Exception as exc:
             logger.error("Bandwidth collection failed: %s", exc)

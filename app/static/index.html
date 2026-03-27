@@ -188,6 +188,81 @@
   }
   .alert-icon { font-size: 16px; flex-shrink: 0; }
 
+  /* ── View tabs (Dashboard / Summary) ──────────── */
+  .view-tabs {
+    display: flex;
+    gap: 2px;
+    margin-bottom: 20px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 4px;
+    width: fit-content;
+  }
+  .view-tab {
+    background: transparent; border: none;
+    color: var(--muted); border-radius: 6px;
+    padding: 7px 20px; font-size: 13px; font-weight: 500;
+    cursor: pointer; transition: all 0.15s;
+  }
+  .view-tab:hover { color: var(--text); background: var(--surface2); }
+  .view-tab.active { background: var(--accent); color: #fff; }
+
+  /* ── Summary sub-tabs ─────────────────────────── */
+  .summary-subtabs {
+    display: flex; gap: 8px; margin-bottom: 20px;
+  }
+  .subtab {
+    background: var(--surface2); border: 1px solid var(--border);
+    color: var(--muted); border-radius: 20px; padding: 5px 18px;
+    font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.15s;
+  }
+  .subtab:hover { color: var(--text); border-color: var(--muted); }
+  .subtab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+  /* ── Usage table ──────────────────────────────── */
+  .summary-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  .summary-table {
+    width: 100%; border-collapse: collapse; font-size: 13px;
+  }
+  .summary-table thead tr {
+    background: var(--surface2);
+    border-bottom: 1px solid var(--border);
+  }
+  .summary-table th {
+    padding: 12px 20px; text-align: left;
+    font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted);
+  }
+  .summary-table th:not(:first-child) { text-align: right; }
+  .summary-table td {
+    padding: 11px 20px; border-bottom: 1px solid rgba(48,54,61,.5);
+    color: var(--text);
+  }
+  .summary-table td:not(:first-child) { text-align: right; font-variant-numeric: tabular-nums; }
+  .summary-table tbody tr:last-child td { border-bottom: none; }
+  .summary-table tbody tr:hover td { background: var(--surface2); }
+  .summary-table tbody tr.current-period td:first-child {
+    font-weight: 600; color: var(--teal);
+  }
+  .summary-table tbody tr.current-period td:first-child::after {
+    content: ' ●'; font-size: 8px; vertical-align: middle;
+  }
+  .summary-table tfoot tr { background: var(--surface2); border-top: 1px solid var(--border); }
+  .summary-table tfoot td {
+    padding: 11px 20px; font-weight: 600; color: var(--muted);
+    border-bottom: none;
+  }
+  .summary-table tfoot td:not(:first-child) { text-align: right; color: var(--text); }
+  .summary-empty {
+    padding: 40px; text-align: center; color: var(--muted); font-size: 13px;
+  }
+
   /* ── No-data overlay ──────────────────────────── */
   .no-data {
     position: absolute; inset: 0;
@@ -244,6 +319,15 @@
 
 <!-- ── Main ───────────────────────────────────────────── -->
 <main>
+
+  <!-- View tabs -->
+  <div class="view-tabs">
+    <button class="view-tab active" id="tab-dashboard" onclick="showView('dashboard')">Dashboard</button>
+    <button class="view-tab" id="tab-summary" onclick="showView('summary')">Usage Summary</button>
+  </div>
+
+  <!-- Dashboard view -->
+  <div id="dashboard-view">
 
   <!-- Config panel -->
   <div id="config-panel" class="collapsed">
@@ -392,7 +476,21 @@
       </div>
     </div>
 
+  </div><!-- #dashboard-view -->
+
+  <!-- Summary view -->
+  <div id="summary-view" style="display:none">
+    <div class="summary-subtabs">
+      <button class="subtab active" id="subtab-hourly"   onclick="showSubtab('hourly')">Hourly</button>
+      <button class="subtab"        id="subtab-daily"    onclick="showSubtab('daily')">Daily</button>
+      <button class="subtab"        id="subtab-monthly"  onclick="showSubtab('monthly')">Monthly</button>
+      <button class="subtab"        id="subtab-yearly"   onclick="showSubtab('yearly')">Yearly</button>
+    </div>
+    <div class="summary-card">
+      <div id="summary-table-wrap"></div>
+    </div>
   </div>
+
 </main>
 
 <footer>
@@ -938,6 +1036,113 @@ function tick() {
 // Range selector
 // ─────────────────────────────────────────────────────────────────────────────
 $('range-select').addEventListener('change', loadData);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// View switching (Dashboard / Summary)
+// ─────────────────────────────────────────────────────────────────────────────
+let activeView    = 'dashboard';
+let activeSubtab  = 'hourly';
+let summaryData   = null;
+
+function showView(view) {
+  activeView = view;
+  $('dashboard-view').style.display = view === 'dashboard' ? '' : 'none';
+  $('summary-view').style.display   = view === 'summary'   ? '' : 'none';
+  $('tab-dashboard').classList.toggle('active', view === 'dashboard');
+  $('tab-summary').classList.toggle('active',   view === 'summary');
+  if (view === 'summary') loadSummary();
+}
+
+function showSubtab(tab) {
+  activeSubtab = tab;
+  ['hourly','daily','monthly','yearly'].forEach(t => {
+    $('subtab-' + t).classList.toggle('active', t === tab);
+  });
+  if (summaryData) renderSummaryTable(summaryData);
+}
+
+async function loadSummary() {
+  try {
+    const r = await fetch('/api/usage-summary');
+    summaryData = await r.json();
+    renderSummaryTable(summaryData);
+  } catch(e) { console.error('loadSummary', e); }
+}
+
+function fmtPeriodLabel(type, key) {
+  const now   = new Date();
+  const today = now.toISOString().slice(0, 10);
+  const yest  = new Date(now - 86400000).toISOString().slice(0, 10);
+
+  if (type === 'hourly') {
+    const [date, hour] = key.split(' ');
+    const prefix = date === today ? 'Today' : date === yest ? 'Yesterday' : date;
+    return `${prefix}  ${hour}:00 – ${String(+hour + 1).padStart(2,'0')}:00`;
+  }
+  if (type === 'daily') {
+    if (key === today) return 'Today';
+    if (key === yest)  return 'Yesterday';
+    const d = new Date(key + 'T12:00:00');
+    return d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+  }
+  if (type === 'monthly') {
+    const d = new Date(key + '-01T12:00:00');
+    return d.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+  }
+  return key; // yearly
+}
+
+function fmtBytesTable(b) {
+  if (!b || b === 0) return '—';
+  const { val, unit } = fmtBytes(b);
+  return `${val} <span style="color:var(--muted);font-size:11px">${unit}</span>`;
+}
+
+function renderSummaryTable(data) {
+  const rows     = data[activeSubtab] || [];
+  const curKey   = data.current_keys?.[activeSubtab] || '';
+  const wrap     = $('summary-table-wrap');
+
+  if (!rows.length) {
+    wrap.innerHTML = '<div class="summary-empty">No data yet — usage accumulates as the poller runs.</div>';
+    return;
+  }
+
+  let totalIn = 0, totalOut = 0;
+  rows.forEach(r => { totalIn += r.bytes_in; totalOut += r.bytes_out; });
+
+  const rowsHtml = rows.map(r => {
+    const isCurrent = r.period_key === curKey;
+    const total = r.bytes_in + r.bytes_out;
+    return `<tr class="${isCurrent ? 'current-period' : ''}">
+      <td>${fmtPeriodLabel(activeSubtab, r.period_key)}</td>
+      <td>${fmtBytesTable(r.bytes_in)}</td>
+      <td>${fmtBytesTable(r.bytes_out)}</td>
+      <td>${fmtBytesTable(total)}</td>
+    </tr>`;
+  }).join('');
+
+  wrap.innerHTML = `
+    <table class="summary-table">
+      <thead>
+        <tr>
+          <th>Period</th>
+          <th>Download</th>
+          <th>Upload</th>
+          <th>Total</th>
+        </tr>
+      </thead>
+      <tbody>${rowsHtml}</tbody>
+      <tfoot>
+        <tr>
+          <td>Total (${rows.length} ${activeSubtab === 'hourly' ? 'hours' : activeSubtab === 'daily' ? 'days' : activeSubtab === 'monthly' ? 'months' : 'years'})</td>
+          <td>${fmtBytesTable(totalIn)}</td>
+          <td>${fmtBytesTable(totalOut)}</td>
+          <td>${fmtBytesTable(totalIn + totalOut)}</td>
+        </tr>
+      </tfoot>
+    </table>`;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Init

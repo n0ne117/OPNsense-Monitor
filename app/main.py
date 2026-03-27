@@ -18,9 +18,11 @@ from database import (
     get_gateway_history,
     get_stored_gateways,
     get_stored_interfaces,
+    get_usage_summary,
     init_db,
     insert_bandwidth,
     insert_gateway,
+    update_usage_summary,
 )
 
 logging.basicConfig(
@@ -157,10 +159,12 @@ async def _poll_once(col: OPNsenseCollector):
         if _active_interface:
             bw = await col.get_bandwidth(_active_interface)
             if bw is not None:
-                insert_bandwidth(_active_interface, bw[0], bw[1])
+                bps_in, bps_out, bytes_in, bytes_out = bw
+                insert_bandwidth(_active_interface, bps_in, bps_out)
+                update_usage_summary(bytes_in, bytes_out)
                 logger.info(
                     "BW %s: ↓ %.2f Mbps  ↑ %.2f Mbps",
-                    _active_interface, bw[0] / 1e6, bw[1] / 1e6,
+                    _active_interface, bps_in / 1e6, bps_out / 1e6,
                 )
         else:
             logger.warning(
@@ -296,6 +300,24 @@ async def api_gateways_live():
         raise HTTPException(503, "Collector not ready")
     gateways = await _collector.get_gateway_status()
     return {"gateways": gateways}
+
+
+@app.get("/api/usage-summary")
+async def api_usage_summary():
+    import datetime
+    now = datetime.datetime.now()
+    return {
+        "hourly":  get_usage_summary("hourly"),
+        "daily":   get_usage_summary("daily"),
+        "monthly": get_usage_summary("monthly"),
+        "yearly":  get_usage_summary("yearly"),
+        "current_keys": {
+            "hourly":  now.strftime("%Y-%m-%d %H"),
+            "daily":   now.strftime("%Y-%m-%d"),
+            "monthly": now.strftime("%Y-%m"),
+            "yearly":  now.strftime("%Y"),
+        },
+    }
 
 
 @app.get("/api/debug/iface-stats")

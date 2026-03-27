@@ -1,6 +1,7 @@
 import sqlite3
 import time
 import os
+import datetime
 from contextlib import contextmanager
 
 DB_PATH = os.environ.get("DB_PATH", "/data/monitor.db")
@@ -45,10 +46,20 @@ def init_db():
                 loss_pct  REAL
             )
         """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_bw_ts  ON bandwidth(timestamp)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_gw_ts  ON gateways(timestamp)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS usage_summary (
+                period_type TEXT NOT NULL,
+                period_key  TEXT NOT NULL,
+                bytes_in    REAL NOT NULL DEFAULT 0,
+                bytes_out   REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY (period_type, period_key)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_bw_ts    ON bandwidth(timestamp)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_gw_ts    ON gateways(timestamp)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_bw_iface ON bandwidth(interface, timestamp)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_gw_name  ON gateways(gateway, timestamp)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_us_type  ON usage_summary(period_type, period_key)")
         conn.commit()
 
 
@@ -76,6 +87,56 @@ def insert_gateway(gateway: str, rtt_ms: float | None, rttd_ms: float | None, lo
         )
         _prune(conn)
         conn.commit()
+
+
+def update_usage_summary(bytes_in: float, bytes_out: float):
+    """
+    Accumulate bytes_in / bytes_out into all four period buckets for right now.
+    Retains: 24 hourly, 365 daily, 120 monthly (10 yrs), all yearly records.
+    """
+    now = datetime.datetime.now()
+    periods = [
+        ("hourly",  now.strftime("%Y-%m-%d %H")),
+        ("daily",   now.strftime("%Y-%m-%d")),
+        ("monthly", now.strftime("%Y-%m")),
+        ("yearly",  now.strftime("%Y")),
+    ]
+    with get_conn() as conn:
+        for pt, pk in periods:
+            conn.execute("""
+                INSERT INTO usage_summary (period_type, period_key, bytes_in, bytes_out)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(period_type, period_key) DO UPDATE SET
+                    bytes_in  = bytes_in  + excluded.bytes_in,
+                    bytes_out = bytes_out + excluded.bytes_out
+            """, (pt, pk, bytes_in, bytes_out))
+
+        # Prune old records (keep most-recent N per type)
+        for pt, limit in (("hourly", 24), ("daily", 365), ("monthly", 120)):
+            conn.execute(f"""
+                DELETE FROM usage_summary
+                WHERE period_type = ?
+                  AND period_key < (
+                      SELECT MIN(period_key) FROM (
+                          SELECT period_key FROM usage_summary
+                          WHERE period_type = ?
+                          ORDER BY period_key DESC
+                          LIMIT ?
+                      )
+                  )
+            """, (pt, pt, limit))
+
+        conn.commit()
+
+
+def get_usage_summary(period_type: str) -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT period_key, bytes_in, bytes_out FROM usage_summary "
+            "WHERE period_type=? ORDER BY period_key DESC",
+            (period_type,),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def get_bandwidth_history(interface: str, since: float | None = None) -> list[dict]:
@@ -113,9 +174,7 @@ def get_daily_totals(interface: str) -> dict:
     """
     Return total bytes in/out since midnight (local time) today.
     Computed by integrating the stored bps rates over their intervals.
-    Resets automatically at 00:00 each day.
     """
-    import datetime
     now = datetime.datetime.now()
     midnight = datetime.datetime(now.year, now.month, now.day).timestamp()
 
@@ -132,7 +191,6 @@ def get_daily_totals(interface: str) -> dict:
     total_in = total_out = 0.0
     for i in range(1, len(rows)):
         dt = rows[i]["timestamp"] - rows[i - 1]["timestamp"]
-        # bps_in represents the rate during the interval ending at rows[i]
         total_in  += rows[i]["bps_in"]  * dt / 8
         total_out += rows[i]["bps_out"] * dt / 8
 
