@@ -181,14 +181,16 @@ class OPNsenseCollector:
                     return 0
 
             bytes_in = (
-                _int(iface.get("ibytes"))
+                _int(iface.get("received-bytes"))
+                or _int(iface.get("ibytes"))
                 or _int(iface.get("bytes received"))
                 or _int(iface.get("bytes_received"))
                 or _int(iface.get("rx_bytes"))
                 or 0
             )
             bytes_out = (
-                _int(iface.get("obytes"))
+                _int(iface.get("sent-bytes"))
+                or _int(iface.get("obytes"))
                 or _int(iface.get("bytes transmitted"))
                 or _int(iface.get("bytes_transmitted"))
                 or _int(iface.get("tx_bytes"))
