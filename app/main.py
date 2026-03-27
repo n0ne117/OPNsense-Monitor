@@ -54,6 +54,9 @@ _DEFAULT_CONFIG: dict = {
     "top_talker_interface": os.environ.get("OPNSENSE_TOP_IF", ""),
     "verify_ssl":   os.environ.get("OPNSENSE_VERIFY_SSL", "false").lower() == "true",
     "poll_interval": int(os.environ.get("POLL_INTERVAL", "60")),
+    # Feature toggles — disable to reduce load on the firewall
+    "enable_gateway_monitor": True,
+    "enable_top_talkers":     True,
 }
 
 
@@ -153,24 +156,25 @@ async def _poll_once(col: OPNsenseCollector):
         # ── 1. Gateway status (RTT / RTTd / loss + interface resolution) ──
         gateways = await col.get_gateway_status()
 
-        target_gw = _config.get("gateway", "")
-        for gw in gateways:
-            if gw["rtt_ms"] is not None:
-                if not target_gw or gw["name"] == target_gw:
-                    insert_gateway(
-                        gw["name"],
-                        gw["rtt_ms"],
-                        gw.get("rttd_ms"),
-                        gw.get("loss_pct", 0.0),
-                    )
-                    logger.info(
-                        "GW %s (%s): rtt=%.2f ms  rttd=%s ms  loss=%.1f%%",
-                        gw["name"],
-                        gw.get("address", ""),
-                        gw["rtt_ms"],
-                        f"{gw['rttd_ms']:.2f}" if gw.get("rttd_ms") is not None else "n/a",
-                        gw.get("loss_pct") or 0,
-                    )
+        if _config.get("enable_gateway_monitor", True):
+            target_gw = _config.get("gateway", "")
+            for gw in gateways:
+                if gw["rtt_ms"] is not None:
+                    if not target_gw or gw["name"] == target_gw:
+                        insert_gateway(
+                            gw["name"],
+                            gw["rtt_ms"],
+                            gw.get("rttd_ms"),
+                            gw.get("loss_pct", 0.0),
+                        )
+                        logger.info(
+                            "GW %s (%s): rtt=%.2f ms  rttd=%s ms  loss=%.1f%%",
+                            gw["name"],
+                            gw.get("address", ""),
+                            gw["rtt_ms"],
+                            f"{gw['rttd_ms']:.2f}" if gw.get("rttd_ms") is not None else "n/a",
+                            gw.get("loss_pct") or 0,
+                        )
 
         # ── 2. Resolve BSD + OPN interface names ────────────────────────────
         resolved, resolved_opn = _resolve_interfaces_from_gateways(gateways)
@@ -244,14 +248,16 @@ app = FastAPI(title="OPNsense Monitor", lifespan=lifespan)
 # API routes
 # ---------------------------------------------------------------------------
 class ConfigUpdate(BaseModel):
-    host:                Optional[str]  = None
-    api_key:             Optional[str]  = None
-    api_secret:          Optional[str]  = None
-    interface:           Optional[str]  = None
-    gateway:             Optional[str]  = None
-    top_talker_interface: Optional[str] = None
-    verify_ssl:          Optional[bool] = None
-    poll_interval:       Optional[int]  = None
+    host:                    Optional[str]  = None
+    api_key:                 Optional[str]  = None
+    api_secret:              Optional[str]  = None
+    interface:               Optional[str]  = None
+    gateway:                 Optional[str]  = None
+    top_talker_interface:    Optional[str]  = None
+    verify_ssl:              Optional[bool] = None
+    poll_interval:           Optional[int]  = None
+    enable_gateway_monitor:  Optional[bool] = None
+    enable_top_talkers:      Optional[bool] = None
 
 
 def _safe_config() -> dict:
@@ -452,6 +458,9 @@ async def api_top_talkers():
     Includes per-host 1-minute rate history to identify sustained top users.
     """
     global _top_talker_working_iface
+
+    if not _config.get("enable_top_talkers", True):
+        return {"talkers": [], "top_ip": None, "second_ip": None, "disabled": True}
 
     if _collector is None or not _active_interface:
         return {"talkers": [], "top_ip": None, "second_ip": None}

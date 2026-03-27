@@ -429,6 +429,20 @@
             <option value="true">Yes</option>
           </select>
         </div>
+        <div class="field">
+          <label>Gateway Monitor <span style="font-weight:400; color:var(--muted)">(RTT / RTTd / Loss)</span></label>
+          <select id="cfg-enable-gw">
+            <option value="true">Enabled</option>
+            <option value="false">Disabled — reduces firewall load</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Top Talkers</label>
+          <select id="cfg-enable-top">
+            <option value="true">Enabled</option>
+            <option value="false">Disabled — reduces firewall load</option>
+          </select>
+        </div>
       </div>
       <div class="config-actions">
         <button class="btn primary" onclick="saveConfig()">Save &amp; Apply</button>
@@ -457,17 +471,17 @@
       <div class="kpi-value" id="kpi-ul">—</div>
       <div class="kpi-unit" id="kpi-ul-unit">Mbps</div>
     </div>
-    <div class="kpi" style="--kpi-color: #3fb950">
+    <div class="kpi" data-gw style="--kpi-color: #3fb950">
       <div class="kpi-label">RTT</div>
       <div class="kpi-value" id="kpi-rtt">—</div>
       <div class="kpi-unit">ms</div>
     </div>
-    <div class="kpi" style="--kpi-color: #d29922">
+    <div class="kpi" data-gw style="--kpi-color: #d29922">
       <div class="kpi-label">RTTd (Jitter)</div>
       <div class="kpi-value" id="kpi-rttd">—</div>
       <div class="kpi-unit">ms</div>
     </div>
-    <div class="kpi" style="--kpi-color: #f85149">
+    <div class="kpi" data-gw style="--kpi-color: #f85149">
       <div class="kpi-label">Packet Loss</div>
       <div class="kpi-value" id="kpi-loss">—</div>
       <div class="kpi-unit">%</div>
@@ -829,6 +843,8 @@ let allGwData = {};
 let refreshTimer = null;
 let pollInterval = 60;
 let countdown = pollInterval;
+let enableGatewayMonitor = true;
+let enableTopTalkers     = true;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Load & render
@@ -853,12 +869,42 @@ function setXWindow(chart, hours) {
   chart.options.scales.x.max = now;
 }
 
+function applyFeatureFlags() {
+  // Gateway monitor: show/hide RTT+Loss charts and their KPI section
+  const gwCharts = document.querySelectorAll('#gw-tabs-rtt, #gw-tabs-loss, .chart-card:has(#rtt-chart), .chart-card:has(#loss-chart)');
+  gwCharts.forEach(el => el.style.display = enableGatewayMonitor ? '' : 'none');
+
+  // KPI cards for RTT / RTTd / Loss
+  const gwKpis = document.querySelectorAll('.kpi[data-gw]');
+  gwKpis.forEach(el => el.style.display = enableGatewayMonitor ? '' : 'none');
+
+  // Alert banner (only meaningful when gateway monitor is on)
+  if (!enableGatewayMonitor) {
+    const banner = $('alert-banner');
+    banner.className = 'alert-banner';
+  }
+
+  if (!enableGatewayMonitor) {
+    $('rtt-nodata').textContent  = 'Gateway monitor disabled';
+    $('loss-nodata').textContent = 'Gateway monitor disabled';
+  } else {
+    // Reset to default text (may be overwritten by renderGatewayCharts)
+    $('rtt-nodata').textContent  = 'No gateway data yet';
+    $('loss-nodata').textContent = 'No gateway data yet';
+  }
+
+  // Top talkers strip
+  if (!enableTopTalkers) $('top-talkers').style.display = 'none';
+}
+
 function renderAll(d, hours) {
   renderBandwidth(d.bandwidth || [], hours);
   renderDailyTotals(d.daily_totals || {});
   allGwData = d.gateways || {};
-  renderGatewayTabs();
-  renderGatewayCharts(hours);
+  if (enableGatewayMonitor) {
+    renderGatewayTabs();
+    renderGatewayCharts(hours);
+  }
   $('last-update').textContent = 'Last updated: ' + new Date().toLocaleTimeString();
 }
 
@@ -982,11 +1028,16 @@ async function loadConfig() {
     $('cfg-key').value      = c.api_key       || '';
     // Don't populate secret (masked on server)
     $('cfg-gw').value       = c.gateway       || '';
-    $('cfg-iface').value    = c.interface              || '';
-    $('cfg-top-if').value   = c.top_talker_interface   || '';
-    $('cfg-interval').value = c.poll_interval          || 60;
-    $('cfg-ssl').value      = c.verify_ssl ? 'true' : 'false';
-    pollInterval = parseInt(c.poll_interval) || 60;
+    $('cfg-iface').value      = c.interface            || '';
+    $('cfg-top-if').value     = c.top_talker_interface || '';
+    $('cfg-interval').value   = c.poll_interval        || 60;
+    $('cfg-ssl').value        = c.verify_ssl ? 'true' : 'false';
+    $('cfg-enable-gw').value  = c.enable_gateway_monitor === false ? 'false' : 'true';
+    $('cfg-enable-top').value = c.enable_top_talkers   === false ? 'false' : 'true';
+    pollInterval            = parseInt(c.poll_interval) || 60;
+    enableGatewayMonitor    = c.enable_gateway_monitor !== false;
+    enableTopTalkers        = c.enable_top_talkers     !== false;
+    applyFeatureFlags();
   } catch(e) { console.error('loadConfig', e); }
 }
 
@@ -997,6 +1048,8 @@ async function saveConfig() {
     interface:              $('cfg-iface').value.trim(),
     top_talker_interface:   $('cfg-top-if').value.trim(),
     gateway:                $('cfg-gw').value.trim(),
+    enable_gateway_monitor: $('cfg-enable-gw').value  === 'true',
+    enable_top_talkers:     $('cfg-enable-top').value === 'true',
     poll_interval: parseInt($('cfg-interval').value) || 60,
     verify_ssl:    $('cfg-ssl').value === 'true',
   };
@@ -1280,10 +1333,12 @@ function renderTopTalkers(d) {
 }
 
 async function loadTopTalkers() {
+  if (!enableTopTalkers) { $('top-talkers').style.display = 'none'; return; }
   try {
     const r = await fetch('/api/top-talkers');
     if (!r.ok) { $('top-talkers').style.display = 'none'; return; }
     const d = await r.json();
+    if (d.disabled) { $('top-talkers').style.display = 'none'; return; }
     renderTopTalkers(d);
   } catch(e) {
     $('top-talkers').style.display = 'none';
