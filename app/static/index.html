@@ -794,8 +794,8 @@ function renderGatewayCharts(hours) {
     // Alert banner
     const rtt = last.rtt_ms ?? 0;
     const banner = $('alert-banner');
-    const isCritical = rtt >= 80 || lp >= 4;
-    const isWarning  = !isCritical && (rtt >= 50 || lp >= 1);
+    const isCritical = rtt >= 100 || lp >= 4;
+    const isWarning  = !isCritical && (rtt >= 65 || lp >= 1);
     banner.className = 'alert-banner' + (isCritical ? ' critical' : isWarning ? ' warning' : '');
     if (isCritical) {
       $('alert-icon').textContent = '🔴';
