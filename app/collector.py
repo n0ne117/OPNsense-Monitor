@@ -147,8 +147,16 @@ class OPNsenseCollector:
     async def get_top_talkers(self, interface: str, limit: int = 10) -> list[dict]:
         """
         Returns current top bandwidth users via /api/diagnostics/traffic/top/{interface}.
+        `interface` should be the OPNsense logical name (e.g. 'wan', 'opt1'); the
+        endpoint maps it internally to the BSD kernel interface.
+
+        Response format varies by OPNsense version:
+          - Dict keyed by interface name: {"wan": {"status": "ok", "records": [...]}}
+          - Dict with direct "records" key:  {"records": [...]}
+          - Raw list of records (older builds)
+
+        Hostname comes from `rname` (reverse-DNS resolved by OPNsense).
         Sorted by combined rate descending.
-        Each entry: {address, rate_bits_in, rate_bits_out, bytes_in, bytes_out, hostname}
         """
         async with self._client() as c:
             r = await c.get(f"{self.base_url}/api/diagnostics/traffic/top/{interface}")
@@ -161,17 +169,32 @@ class OPNsenseCollector:
             except (ValueError, TypeError):
                 return 0
 
-        records = data.get("records") or []
+        # Normalise response into a flat list regardless of wrapping format
+        records_raw: list = []
+        if isinstance(data, list):
+            records_raw = data
+        elif isinstance(data, dict):
+            if "records" in data:
+                records_raw = data["records"] or []
+            else:
+                # Keyed by interface name: {"wan": {"status":"ok","records":[...]}}
+                for iface_data in data.values():
+                    if isinstance(iface_data, dict) and "records" in iface_data:
+                        records_raw.extend(iface_data.get("records") or [])
+
         result = []
-        for rec in records:
+        for rec in records_raw:
+            if not isinstance(rec, dict):
+                continue
             address = (rec.get("address") or rec.get("src") or "").strip()
             if not address:
                 continue
-            rate_in  = _int(rec.get("rate_bits_in")  or rec.get("rate_in")  or 0)
-            rate_out = _int(rec.get("rate_bits_out") or rec.get("rate_out") or 0)
+            rate_in  = _int(rec.get("rate_bits_in")  or 0)
+            rate_out = _int(rec.get("rate_bits_out") or 0)
             bytes_in  = _int(rec.get("cumulative_bytes_in")  or rec.get("bytes_in")  or 0)
             bytes_out = _int(rec.get("cumulative_bytes_out") or rec.get("bytes_out") or 0)
-            hostname  = (rec.get("hostname") or rec.get("host") or "").strip()
+            # rname = reverse-DNS hostname provided by OPNsense; fall back gracefully
+            hostname = (rec.get("rname") or rec.get("hostname") or rec.get("host") or "").strip()
             result.append({
                 "address":       address,
                 "rate_bits_in":  rate_in,

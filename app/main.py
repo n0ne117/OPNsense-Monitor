@@ -84,6 +84,8 @@ _status: dict = {"ok": None, "error": None, "last_poll": None}
 
 # The actual BSD kernel interface name used for bandwidth (may be auto-resolved)
 _active_interface: str = _config.get("interface", "")
+# OPNsense logical interface name (e.g. "wan", "opt1") — needed for traffic/top API
+_active_opn_interface: str = ""
 
 # ── Top-talkers state ─────────────────────────────────────────────────────────
 # DNS cache: ip -> (hostname, expiry_timestamp)
@@ -103,39 +105,43 @@ def _make_collector() -> OPNsenseCollector:
     )
 
 
-def _resolve_interface_from_gateways(gateways: list[dict]) -> str:
+def _resolve_interfaces_from_gateways(gateways: list[dict]) -> tuple[str, str]:
     """
-    Given the live gateway list, return the BSD interface name to use for
-    bandwidth monitoring.
+    Given the live gateway list, return (bsd_if, opn_if) for bandwidth monitoring.
+
+    bsd_if — BSD kernel name (e.g. 'ix1') used for interface statistics API.
+    opn_if — OPNsense logical name (e.g. 'wan') used for traffic/top API.
 
     Priority:
-      1. Explicit override in config['interface']
-      2. bsd_if extracted from the configured gateway's 'if' API field
-      3. bsd_if from the first gateway that has one
+      1. Explicit override in config['interface'] (bsd_if only; opn_if stays empty)
+      2. Names from the configured gateway
+      3. Names from the first gateway that has them
     """
-    # Explicit override always wins
     manual = _config.get("interface", "").strip()
     if manual:
-        return manual
+        return manual, ""
 
     target = _config.get("gateway", "").strip()
 
-    # Try the configured gateway first
     if target:
         for gw in gateways:
             if gw["name"] == target and gw.get("bsd_if"):
-                return gw["bsd_if"]
+                return gw["bsd_if"], gw.get("opn_if", "")
 
-    # Fall back to any gateway that has a bsd_if
     for gw in gateways:
         if gw.get("bsd_if"):
-            return gw["bsd_if"]
+            return gw["bsd_if"], gw.get("opn_if", "")
 
-    return ""
+    return "", ""
+
+
+# Keep old name as alias so nothing else breaks
+def _resolve_interface_from_gateways(gateways: list[dict]) -> str:
+    return _resolve_interfaces_from_gateways(gateways)[0]
 
 
 async def _poll_once(col: OPNsenseCollector):
-    global _status, _active_interface
+    global _status, _active_interface, _active_opn_interface
 
     try:
         # ── 1. Gateway status (RTT / RTTd / loss + interface resolution) ──
@@ -160,14 +166,15 @@ async def _poll_once(col: OPNsenseCollector):
                         gw.get("loss_pct") or 0,
                     )
 
-        # ── 2. Resolve BSD interface for bandwidth ──────────────────────────
-        resolved = _resolve_interface_from_gateways(gateways)
+        # ── 2. Resolve BSD + OPN interface names ────────────────────────────
+        resolved, resolved_opn = _resolve_interfaces_from_gateways(gateways)
         if resolved and resolved != _active_interface:
             logger.info(
-                "Active interface: %r → %r (auto-resolved from gateway)",
-                _active_interface, resolved,
+                "Active interface: %r → %r (bsd) / %r (opn)",
+                _active_interface, resolved, resolved_opn,
             )
         _active_interface = resolved
+        _active_opn_interface = resolved_opn
 
         # ── 3. Bandwidth ────────────────────────────────────────────────────
         if _active_interface:
@@ -202,12 +209,12 @@ async def _poll_loop():
 
 
 def _restart_poll():
-    global _poll_task, _collector, _active_interface
+    global _poll_task, _collector, _active_interface, _active_opn_interface
     if _poll_task and not _poll_task.done():
         _poll_task.cancel()
     _collector = None
-    # Reset resolved interface so it gets re-resolved after config change
     _active_interface = _config.get("interface", "")
+    _active_opn_interface = ""
     _poll_task = asyncio.create_task(_poll_loop())
 
 
@@ -364,8 +371,12 @@ async def api_top_talkers():
     if _collector is None or not _active_interface:
         return {"talkers": [], "top_ip": None, "second_ip": None}
 
+    # Prefer the logical OPNsense interface name (e.g. "wan"); the traffic/top
+    # endpoint expects logical names and keys its response by them.
+    # Fall back to the BSD name if the logical name hasn't been resolved yet.
+    iface_for_top = _active_opn_interface or _active_interface
     try:
-        records = await _collector.get_top_talkers(_active_interface, limit=10)
+        records = await _collector.get_top_talkers(iface_for_top, limit=10)
     except Exception as exc:
         logger.warning("Top talkers fetch failed: %s", exc)
         return {"talkers": [], "top_ip": None, "second_ip": None}
