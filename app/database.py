@@ -185,6 +185,35 @@ def compute_daily_from_bandwidth() -> list[dict]:
     return sorted(merged.values(), key=lambda x: x["period_key"], reverse=True)
 
 
+def compute_monthly_from_daily() -> list[dict]:
+    """
+    Derive monthly totals by summing all daily records.
+    Uses compute_daily_from_bandwidth() so recent days are always accurate.
+    """
+    monthly: dict[str, dict] = {}
+    for row in compute_daily_from_bandwidth():
+        mk = row["period_key"][:7]          # "2026-03-27" → "2026-03"
+        if mk not in monthly:
+            monthly[mk] = {"period_key": mk, "bytes_in": 0.0, "bytes_out": 0.0}
+        monthly[mk]["bytes_in"]  += row["bytes_in"]
+        monthly[mk]["bytes_out"] += row["bytes_out"]
+    return sorted(monthly.values(), key=lambda x: x["period_key"], reverse=True)
+
+
+def compute_yearly_from_monthly() -> list[dict]:
+    """
+    Derive yearly totals by summing all monthly records.
+    """
+    yearly: dict[str, dict] = {}
+    for row in compute_monthly_from_daily():
+        yk = row["period_key"][:4]          # "2026-03" → "2026"
+        if yk not in yearly:
+            yearly[yk] = {"period_key": yk, "bytes_in": 0.0, "bytes_out": 0.0}
+        yearly[yk]["bytes_in"]  += row["bytes_in"]
+        yearly[yk]["bytes_out"] += row["bytes_out"]
+    return sorted(yearly.values(), key=lambda x: x["period_key"], reverse=True)
+
+
 def get_usage_summary(period_type: str) -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute(
