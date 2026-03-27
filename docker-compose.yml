@@ -1,0 +1,19 @@
+services:
+  opnsense-monitor:
+    build: .
+    container_name: opnsense-monitor
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    environment:
+      - OPNSENSE_HOST=${OPNSENSE_HOST:-https://192.168.1.1}
+      - OPNSENSE_API_KEY=${OPNSENSE_API_KEY:-}
+      - OPNSENSE_API_SECRET=${OPNSENSE_API_SECRET:-}
+      - OPNSENSE_INTERFACE=${OPNSENSE_INTERFACE:-em0}
+      - OPNSENSE_GATEWAY=${OPNSENSE_GATEWAY:-}
+      - OPNSENSE_VERIFY_SSL=${OPNSENSE_VERIFY_SSL:-false}
+      - POLL_INTERVAL=${POLL_INTERVAL:-60}
+      - DB_PATH=/data/monitor.db
+      - CONFIG_PATH=/data/config.json

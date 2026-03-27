@@ -1,0 +1,836 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>OPNsense Monitor</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<style>
+  :root {
+    --bg:        #0d1117;
+    --surface:   #161b22;
+    --surface2:  #1c2128;
+    --border:    #30363d;
+    --text:      #e6edf3;
+    --muted:     #7d8590;
+    --accent:    #2f81f7;
+    --green:     #3fb950;
+    --yellow:    #d29922;
+    --red:       #f85149;
+    --teal:      #39d0d4;
+    --purple:    #a371f7;
+    --font:      'Segoe UI', system-ui, -apple-system, sans-serif;
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 14px; }
+
+  /* ── Layout ─────────────────────────────────── */
+  .app { display: flex; flex-direction: column; min-height: 100vh; }
+
+  header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 0 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 56px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .header-left { display: flex; align-items: center; gap: 12px; }
+  .logo { font-size: 18px; font-weight: 700; letter-spacing: -0.3px; color: var(--text); }
+  .logo span { color: var(--accent); }
+  .status-dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--muted);
+    transition: background 0.4s;
+    flex-shrink: 0;
+  }
+  .status-dot.ok   { background: var(--green);  box-shadow: 0 0 6px var(--green); }
+  .status-dot.err  { background: var(--red);    box-shadow: 0 0 6px var(--red); }
+  .status-label { font-size: 12px; color: var(--muted); }
+  .header-right { display: flex; align-items: center; gap: 12px; }
+  .btn {
+    background: var(--surface2); border: 1px solid var(--border);
+    color: var(--text); border-radius: 6px; padding: 6px 14px;
+    font-size: 13px; cursor: pointer; transition: background 0.15s, border-color 0.15s;
+    white-space: nowrap;
+  }
+  .btn:hover { background: var(--border); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.primary:hover { filter: brightness(1.1); }
+  .btn.danger { background: transparent; border-color: var(--red); color: var(--red); }
+  .btn.danger:hover { background: rgba(248,81,73,.1); }
+  .range-select {
+    background: var(--surface2); border: 1px solid var(--border);
+    color: var(--text); border-radius: 6px; padding: 5px 10px; font-size: 13px;
+    cursor: pointer;
+  }
+
+  main { flex: 1; padding: 24px; max-width: 1400px; margin: 0 auto; width: 100%; }
+
+  /* ── Config panel ─────────────────────────────── */
+  #config-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    margin-bottom: 24px;
+    overflow: hidden;
+    transition: max-height 0.3s ease;
+  }
+  #config-panel.collapsed .config-body { display: none; }
+  .config-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 20px; cursor: pointer; user-select: none;
+  }
+  .config-header h3 { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .config-header .chevron { transition: transform 0.25s; font-size: 11px; color: var(--muted); }
+  #config-panel:not(.collapsed) .config-header .chevron { transform: rotate(180deg); }
+  .config-body { padding: 0 20px 20px; }
+  .config-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 14px;
+    margin-bottom: 16px;
+  }
+  .field { display: flex; flex-direction: column; gap: 5px; }
+  label { font-size: 12px; color: var(--muted); font-weight: 500; text-transform: uppercase; letter-spacing: 0.4px; }
+  input, select {
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 7px 10px; font-size: 13px; outline: none;
+    transition: border-color 0.15s;
+  }
+  input:focus, select:focus { border-color: var(--accent); }
+  .config-actions { display: flex; gap: 10px; align-items: center; }
+  #save-msg { font-size: 13px; color: var(--green); opacity: 0; transition: opacity 0.4s; }
+  #save-msg.show { opacity: 1; }
+
+  /* ── KPI row ─────────────────────────────────── */
+  .kpi-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 14px;
+    margin-bottom: 24px;
+  }
+  .kpi {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    display: flex; flex-direction: column; gap: 4px;
+    position: relative; overflow: hidden;
+  }
+  .kpi::before {
+    content: '';
+    position: absolute; top: 0; left: 0; right: 0; height: 2px;
+    background: var(--kpi-color, var(--accent));
+  }
+  .kpi-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; font-weight: 600; }
+  .kpi-value { font-size: 26px; font-weight: 700; line-height: 1; color: var(--kpi-color, var(--text)); }
+  .kpi-unit  { font-size: 12px; color: var(--muted); }
+  .kpi-sub   { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+  /* ── Charts ──────────────────────────────────── */
+  .charts { display: flex; flex-direction: column; gap: 20px; }
+  .chart-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+  }
+  .chart-title {
+    font-size: 13px; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.5px;
+    margin-bottom: 16px;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .chart-legend { display: flex; gap: 16px; align-items: center; }
+  .legend-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .legend-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); font-weight: 400; text-transform: none; letter-spacing: 0; }
+  .chart-wrap { position: relative; height: 220px; }
+  canvas { width: 100% !important; }
+
+  /* ── Gateway selector ─────────────────────────── */
+  .gw-tabs { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+  .gw-tab {
+    background: var(--surface2); border: 1px solid var(--border);
+    color: var(--muted); border-radius: 20px; padding: 4px 14px;
+    font-size: 12px; cursor: pointer; transition: all 0.15s;
+  }
+  .gw-tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+  /* ── No-data overlay ──────────────────────────── */
+  .no-data {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; color: var(--muted);
+    background: rgba(13,17,23,.7);
+    border-radius: 6px;
+    pointer-events: none;
+  }
+
+  /* ── Footer ───────────────────────────────────── */
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 12px 24px;
+    font-size: 12px;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  #next-refresh { font-variant-numeric: tabular-nums; }
+
+  @media (max-width: 600px) {
+    main { padding: 14px; }
+    .kpi-row { grid-template-columns: repeat(2, 1fr); }
+    .chart-wrap { height: 180px; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+
+<!-- ── Header ─────────────────────────────────────────── -->
+<header>
+  <div class="header-left">
+    <div class="logo">OPN<span>sense</span> Monitor</div>
+    <div class="status-dot" id="status-dot"></div>
+    <div class="status-label" id="status-label">connecting…</div>
+  </div>
+  <div class="header-right">
+    <select class="range-select" id="range-select" title="Time range">
+      <option value="1">Last 1 h</option>
+      <option value="3">Last 3 h</option>
+      <option value="6">Last 6 h</option>
+      <option value="12">Last 12 h</option>
+      <option value="24" selected>Last 24 h</option>
+    </select>
+    <button class="btn" onclick="loadData()">↻ Refresh</button>
+    <button class="btn" onclick="toggleConfig()">⚙ Settings</button>
+  </div>
+</header>
+
+<!-- ── Main ───────────────────────────────────────────── -->
+<main>
+
+  <!-- Config panel -->
+  <div id="config-panel" class="collapsed">
+    <div class="config-header" onclick="toggleConfig()">
+      <h3>⚙ Connection Settings</h3>
+      <span class="chevron">▼</span>
+    </div>
+    <div class="config-body">
+      <div class="config-grid">
+        <div class="field">
+          <label>OPNsense Host</label>
+          <input id="cfg-host" type="text" placeholder="https://192.168.1.1"/>
+        </div>
+        <div class="field">
+          <label>API Key</label>
+          <input id="cfg-key" type="text" placeholder="your_api_key"/>
+        </div>
+        <div class="field">
+          <label>API Secret</label>
+          <input id="cfg-secret" type="password" placeholder="your_api_secret"/>
+        </div>
+        <div class="field">
+          <label>WAN Interface</label>
+          <input id="cfg-iface" type="text" placeholder="em0 / igb0 / vtnet0"/>
+        </div>
+        <div class="field">
+          <label>Gateway (leave empty = all)</label>
+          <input id="cfg-gw" type="text" placeholder="WAN_DHCP"/>
+        </div>
+        <div class="field">
+          <label>Poll Interval (seconds)</label>
+          <input id="cfg-interval" type="number" min="10" max="3600" placeholder="60"/>
+        </div>
+        <div class="field">
+          <label>Verify SSL Certificate</label>
+          <select id="cfg-ssl">
+            <option value="false">No (self-signed OK)</option>
+            <option value="true">Yes</option>
+          </select>
+        </div>
+      </div>
+      <div class="config-actions">
+        <button class="btn primary" onclick="saveConfig()">Save &amp; Apply</button>
+        <button class="btn" onclick="fetchInterfaces()">Detect Interfaces</button>
+        <span id="save-msg">✓ Saved</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- KPI row -->
+  <div class="kpi-row" id="kpi-row">
+    <div class="kpi" style="--kpi-color: #39d0d4">
+      <div class="kpi-label">Download</div>
+      <div class="kpi-value" id="kpi-dl">—</div>
+      <div class="kpi-unit" id="kpi-dl-unit">Mbps</div>
+    </div>
+    <div class="kpi" style="--kpi-color: #a371f7">
+      <div class="kpi-label">Upload</div>
+      <div class="kpi-value" id="kpi-ul">—</div>
+      <div class="kpi-unit" id="kpi-ul-unit">Mbps</div>
+    </div>
+    <div class="kpi" style="--kpi-color: #3fb950">
+      <div class="kpi-label">RTT</div>
+      <div class="kpi-value" id="kpi-rtt">—</div>
+      <div class="kpi-unit">ms</div>
+    </div>
+    <div class="kpi" style="--kpi-color: #d29922">
+      <div class="kpi-label">RTTd (Jitter)</div>
+      <div class="kpi-value" id="kpi-rttd">—</div>
+      <div class="kpi-unit">ms</div>
+    </div>
+    <div class="kpi" style="--kpi-color: #f85149">
+      <div class="kpi-label">Packet Loss</div>
+      <div class="kpi-value" id="kpi-loss">—</div>
+      <div class="kpi-unit">%</div>
+      <div class="kpi-sub" id="kpi-loss-abs"></div>
+    </div>
+  </div>
+
+  <!-- Charts -->
+  <div class="charts">
+
+    <!-- Bandwidth -->
+    <div class="chart-card">
+      <div class="chart-title">
+        Bandwidth
+        <div class="chart-legend">
+          <div class="legend-item"><div class="legend-dot" style="background:#39d0d4"></div>Download</div>
+          <div class="legend-item"><div class="legend-dot" style="background:#a371f7"></div>Upload</div>
+        </div>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="bw-chart"></canvas>
+        <div class="no-data" id="bw-nodata">No data yet — waiting for first poll</div>
+      </div>
+    </div>
+
+    <!-- RTT / RTTd -->
+    <div class="chart-card">
+      <div class="chart-title">
+        RTT &amp; Jitter (RTTd)
+        <div class="chart-legend">
+          <div class="legend-item"><div class="legend-dot" style="background:#3fb950"></div>RTT</div>
+          <div class="legend-item"><div class="legend-dot" style="background:#d29922"></div>RTTd</div>
+        </div>
+      </div>
+      <div id="gw-tabs-rtt" class="gw-tabs"></div>
+      <div class="chart-wrap">
+        <canvas id="rtt-chart"></canvas>
+        <div class="no-data" id="rtt-nodata">No gateway data yet</div>
+      </div>
+    </div>
+
+    <!-- Packet Loss -->
+    <div class="chart-card">
+      <div class="chart-title">
+        Packet Loss
+        <div class="chart-legend">
+          <div class="legend-item"><div class="legend-dot" style="background:#f85149"></div>Loss %</div>
+          <div class="legend-item"><div class="legend-dot" style="background:#ff8c69"></div>Packets lost (est.)</div>
+        </div>
+      </div>
+      <div id="gw-tabs-loss" class="gw-tabs"></div>
+      <div class="chart-wrap">
+        <canvas id="loss-chart"></canvas>
+        <div class="no-data" id="loss-nodata">No gateway data yet</div>
+      </div>
+    </div>
+
+  </div>
+</main>
+
+<footer>
+  <div id="last-update">Never updated</div>
+  <div>Next refresh in <span id="next-refresh">—</span> s</div>
+</footer>
+
+</div><!-- .app -->
+
+<script>
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+
+function fmtBps(bps) {
+  if (bps == null || isNaN(bps)) return { val: '—', unit: '' };
+  if (bps >= 1e9)  return { val: (bps/1e9).toFixed(2),  unit: 'Gbps' };
+  if (bps >= 1e6)  return { val: (bps/1e6).toFixed(2),  unit: 'Mbps' };
+  if (bps >= 1e3)  return { val: (bps/1e3).toFixed(1),  unit: 'Kbps' };
+  return { val: bps.toFixed(0), unit: 'bps' };
+}
+
+function fmtMs(ms) {
+  if (ms == null || isNaN(ms)) return '—';
+  return ms.toFixed(2);
+}
+
+function bpsLabel(bps) {
+  if (bps >= 1e9) return (bps/1e9).toFixed(2) + ' Gbps';
+  if (bps >= 1e6) return (bps/1e6).toFixed(2) + ' Mbps';
+  if (bps >= 1e3) return (bps/1e3).toFixed(1) + ' Kbps';
+  return bps.toFixed(0) + ' bps';
+}
+
+// Dpinger default: 100-packet window  → estimate lost count
+const DPINGER_WINDOW = 100;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Chart defaults
+// ─────────────────────────────────────────────────────────────────────────────
+Chart.defaults.color       = '#7d8590';
+Chart.defaults.borderColor = '#30363d';
+Chart.defaults.font.family = "'Segoe UI', system-ui, sans-serif";
+Chart.defaults.font.size   = 11;
+
+const TIME_AXIS_OPTS = {
+  type: 'time',
+  time: { tooltipFormat: 'HH:mm:ss', displayFormats: { minute: 'HH:mm', hour: 'HH:mm' } },
+  grid: { color: '#1c2128' },
+  ticks: { maxTicksLimit: 8, color: '#7d8590' },
+};
+
+function makeTooltip(extra) {
+  return {
+    mode: 'index',
+    intersect: false,
+    backgroundColor: '#1c2128',
+    borderColor: '#30363d',
+    borderWidth: 1,
+    titleColor: '#e6edf3',
+    bodyColor: '#7d8590',
+    padding: 10,
+    callbacks: extra || {},
+  };
+}
+
+function gradient(ctx, top, bottom) {
+  const g = ctx.createLinearGradient(0, 0, 0, 220);
+  g.addColorStop(0,   top);
+  g.addColorStop(1, bottom);
+  return g;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Build charts
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Bandwidth chart
+const bwCtx = $('bw-chart').getContext('2d');
+const bwChart = new Chart(bwCtx, {
+  type: 'line',
+  data: { datasets: [
+    {
+      label: 'Download',
+      data: [],
+      borderColor: '#39d0d4',
+      backgroundColor: gradient(bwCtx, 'rgba(57,208,212,.18)', 'rgba(57,208,212,.01)'),
+      fill: true,
+      tension: 0.3,
+      borderWidth: 2,
+      pointRadius: 0,
+      pointHoverRadius: 4,
+    },
+    {
+      label: 'Upload',
+      data: [],
+      borderColor: '#a371f7',
+      backgroundColor: gradient(bwCtx, 'rgba(163,113,247,.18)', 'rgba(163,113,247,.01)'),
+      fill: true,
+      tension: 0.3,
+      borderWidth: 2,
+      pointRadius: 0,
+      pointHoverRadius: 4,
+    },
+  ]},
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: { mode: 'index', intersect: false },
+    plugins: {
+      legend: { display: false },
+      tooltip: makeTooltip({
+        label(ctx) {
+          return ` ${ctx.dataset.label}: ${bpsLabel(ctx.parsed.y)}`;
+        }
+      }),
+    },
+    scales: {
+      x: TIME_AXIS_OPTS,
+      y: {
+        grid: { color: '#1c2128' },
+        ticks: {
+          color: '#7d8590',
+          callback(v) {
+            if (v >= 1e9) return (v/1e9).toFixed(1) + ' G';
+            if (v >= 1e6) return (v/1e6).toFixed(1) + ' M';
+            if (v >= 1e3) return (v/1e3).toFixed(0) + ' K';
+            return v;
+          }
+        },
+        min: 0,
+      },
+    },
+  },
+});
+
+// RTT chart
+const rttCtx = $('rtt-chart').getContext('2d');
+const rttChart = new Chart(rttCtx, {
+  type: 'line',
+  data: { datasets: [
+    {
+      label: 'RTT',
+      data: [],
+      borderColor: '#3fb950',
+      backgroundColor: gradient(rttCtx, 'rgba(63,185,80,.15)', 'rgba(63,185,80,.01)'),
+      fill: true,
+      tension: 0.3,
+      borderWidth: 2,
+      pointRadius: 0,
+      pointHoverRadius: 4,
+    },
+    {
+      label: 'RTTd (Jitter)',
+      data: [],
+      borderColor: '#d29922',
+      backgroundColor: gradient(rttCtx, 'rgba(210,153,34,.12)', 'rgba(210,153,34,.01)'),
+      fill: true,
+      tension: 0.3,
+      borderWidth: 2,
+      borderDash: [4, 3],
+      pointRadius: 0,
+      pointHoverRadius: 4,
+    },
+  ]},
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: { mode: 'index', intersect: false },
+    plugins: {
+      legend: { display: false },
+      tooltip: makeTooltip({
+        label(ctx) {
+          const v = ctx.parsed.y;
+          return ` ${ctx.dataset.label}: ${v != null ? v.toFixed(3) + ' ms' : '—'}`;
+        }
+      }),
+    },
+    scales: {
+      x: TIME_AXIS_OPTS,
+      y: {
+        grid: { color: '#1c2128' },
+        ticks: { color: '#7d8590', callback: v => v + ' ms' },
+        min: 0,
+      },
+    },
+  },
+});
+
+// Loss chart  (dual y-axis: left = %, right = packets)
+const lossCtx = $('loss-chart').getContext('2d');
+const lossChart = new Chart(lossCtx, {
+  type: 'line',
+  data: { datasets: [
+    {
+      label: 'Loss %',
+      data: [],
+      borderColor: '#f85149',
+      backgroundColor: gradient(lossCtx, 'rgba(248,81,73,.18)', 'rgba(248,81,73,.01)'),
+      fill: true,
+      tension: 0.3,
+      borderWidth: 2,
+      pointRadius: 0,
+      pointHoverRadius: 4,
+      yAxisID: 'y',
+    },
+    {
+      label: 'Packets lost',
+      data: [],
+      borderColor: '#ff8c69',
+      backgroundColor: 'transparent',
+      fill: false,
+      tension: 0.3,
+      borderWidth: 1.5,
+      borderDash: [5, 4],
+      pointRadius: 0,
+      pointHoverRadius: 4,
+      yAxisID: 'y2',
+    },
+  ]},
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: { mode: 'index', intersect: false },
+    plugins: {
+      legend: { display: false },
+      tooltip: makeTooltip({
+        label(ctx) {
+          if (ctx.datasetIndex === 0) {
+            return ` Loss: ${ctx.parsed.y != null ? ctx.parsed.y.toFixed(2) + ' %' : '—'}`;
+          }
+          const v = ctx.parsed.y;
+          return ` Lost packets: ${v != null ? Math.round(v) + ' / ' + DPINGER_WINDOW : '—'}`;
+        }
+      }),
+    },
+    scales: {
+      x: TIME_AXIS_OPTS,
+      y: {
+        position: 'left',
+        grid: { color: '#1c2128' },
+        ticks: { color: '#7d8590', callback: v => v + ' %' },
+        min: 0,
+        max: 100,
+      },
+      y2: {
+        position: 'right',
+        grid: { drawOnChartArea: false },
+        ticks: { color: '#7d8590', callback: v => v + ' pkts', stepSize: 1 },
+        min: 0,
+        max: DPINGER_WINDOW,
+      },
+    },
+  },
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// State
+// ─────────────────────────────────────────────────────────────────────────────
+let activeGw = null;
+let allGwData = {};
+let refreshTimer = null;
+let countdown = 30;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Load & render
+// ─────────────────────────────────────────────────────────────────────────────
+async function loadData() {
+  const hours = parseFloat($('range-select').value) || 24;
+  try {
+    const resp = await fetch(`/api/data?hours=${hours}`);
+    if (!resp.ok) throw new Error(resp.statusText);
+    const d = await resp.json();
+    renderAll(d);
+  } catch(e) {
+    console.error('loadData', e);
+  }
+  resetCountdown();
+}
+
+function renderAll(d) {
+  renderBandwidth(d.bandwidth || []);
+  allGwData = d.gateways || {};
+  renderGatewayTabs();
+  renderGatewayCharts();
+  $('last-update').textContent = 'Last updated: ' + new Date().toLocaleTimeString();
+}
+
+function renderBandwidth(rows) {
+  const hasData = rows.length > 0;
+  $('bw-nodata').style.display = hasData ? 'none' : 'flex';
+
+  const dlData = rows.map(r => ({ x: r.timestamp * 1000, y: r.bps_in  }));
+  const ulData = rows.map(r => ({ x: r.timestamp * 1000, y: r.bps_out }));
+
+  bwChart.data.datasets[0].data = dlData;
+  bwChart.data.datasets[1].data = ulData;
+  bwChart.update('none');
+
+  if (rows.length > 0) {
+    const last = rows[rows.length - 1];
+    const dl = fmtBps(last.bps_in);
+    const ul = fmtBps(last.bps_out);
+    $('kpi-dl').textContent      = dl.val;
+    $('kpi-dl-unit').textContent = dl.unit;
+    $('kpi-ul').textContent      = ul.val;
+    $('kpi-ul-unit').textContent = ul.unit;
+  }
+}
+
+function renderGatewayTabs() {
+  const names = Object.keys(allGwData);
+  if (names.length === 0) return;
+
+  // Set default if not set or no longer exists
+  if (!activeGw || !allGwData[activeGw]) activeGw = names[0];
+
+  ['rtt','loss'].forEach(which => {
+    const container = $(`gw-tabs-${which}`);
+    container.innerHTML = '';
+    if (names.length <= 1) return; // hide tabs when only one gateway
+    names.forEach(name => {
+      const tab = document.createElement('button');
+      tab.className = 'gw-tab' + (name === activeGw ? ' active' : '');
+      tab.textContent = name;
+      tab.onclick = () => { activeGw = name; renderGatewayTabs(); renderGatewayCharts(); };
+      container.appendChild(tab);
+    });
+  });
+}
+
+function renderGatewayCharts() {
+  const rows = (allGwData[activeGw] || []);
+  const hasData = rows.length > 0;
+
+  $('rtt-nodata').style.display  = hasData ? 'none' : 'flex';
+  $('loss-nodata').style.display = hasData ? 'none' : 'flex';
+
+  const rttData  = rows.map(r => ({ x: r.timestamp * 1000, y: r.rtt_ms  }));
+  const rttdData = rows.map(r => ({ x: r.timestamp * 1000, y: r.rttd_ms }));
+  const lossData = rows.map(r => ({ x: r.timestamp * 1000, y: r.loss_pct }));
+  const lostPktData = rows.map(r => ({
+    x: r.timestamp * 1000,
+    y: r.loss_pct != null ? (r.loss_pct / 100) * DPINGER_WINDOW : null,
+  }));
+
+  rttChart.data.datasets[0].data  = rttData;
+  rttChart.data.datasets[1].data  = rttdData;
+  rttChart.update('none');
+
+  lossChart.data.datasets[0].data = lossData;
+  lossChart.data.datasets[1].data = lostPktData;
+  lossChart.update('none');
+
+  if (rows.length > 0) {
+    const last = rows[rows.length - 1];
+    $('kpi-rtt').textContent  = fmtMs(last.rtt_ms);
+    $('kpi-rttd').textContent = fmtMs(last.rttd_ms);
+    const lp = last.loss_pct ?? 0;
+    $('kpi-loss').textContent = lp.toFixed(2);
+    const lostPkts = Math.round((lp / 100) * DPINGER_WINDOW);
+    $('kpi-loss-abs').textContent = `≈ ${lostPkts} / ${DPINGER_WINDOW} pkts`;
+
+    // Colour KPI card
+    const lossKpi = document.querySelector('[style="--kpi-color: #f85149"]');
+    if (lossKpi) {
+      lossKpi.style.setProperty('--kpi-color', lp === 0 ? '#3fb950' : lp < 5 ? '#d29922' : '#f85149');
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Config
+// ─────────────────────────────────────────────────────────────────────────────
+async function loadConfig() {
+  try {
+    const r = await fetch('/api/config');
+    const c = await r.json();
+    $('cfg-host').value     = c.host     || '';
+    $('cfg-key').value      = c.api_key  || '';
+    // Don't populate secret (masked)
+    $('cfg-iface').value    = c.interface || '';
+    $('cfg-gw').value       = c.gateway   || '';
+    $('cfg-interval').value = c.poll_interval || 60;
+    $('cfg-ssl').value      = c.verify_ssl ? 'true' : 'false';
+  } catch(e) { console.error('loadConfig', e); }
+}
+
+async function saveConfig() {
+  const body = {
+    host:          $('cfg-host').value.trim(),
+    api_key:       $('cfg-key').value.trim(),
+    interface:     $('cfg-iface').value.trim(),
+    gateway:       $('cfg-gw').value.trim(),
+    poll_interval: parseInt($('cfg-interval').value) || 60,
+    verify_ssl:    $('cfg-ssl').value === 'true',
+  };
+  const secret = $('cfg-secret').value.trim();
+  if (secret) body.api_secret = secret;
+
+  try {
+    const r = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error(r.statusText);
+    const msg = $('save-msg');
+    msg.classList.add('show');
+    setTimeout(() => msg.classList.remove('show'), 2500);
+    setTimeout(loadData, 1500); // reload after restart
+  } catch(e) { alert('Save failed: ' + e.message); }
+}
+
+async function fetchInterfaces() {
+  try {
+    const r = await fetch('/api/interfaces');
+    const d = await r.json();
+    if (d.interfaces && d.interfaces.length) {
+      alert('Available interfaces:\n' + d.interfaces.join('\n'));
+    } else {
+      alert('No interfaces found (check connection settings).');
+    }
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+function toggleConfig() {
+  $('config-panel').classList.toggle('collapsed');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Poll status indicator
+// ─────────────────────────────────────────────────────────────────────────────
+async function pollStatus() {
+  try {
+    const r = await fetch('/api/status');
+    const d = await r.json();
+    const s = d.poll_status;
+    const dot   = $('status-dot');
+    const label = $('status-label');
+    if (s.ok === true) {
+      dot.className   = 'status-dot ok';
+      label.textContent = 'Connected';
+    } else if (s.ok === false) {
+      dot.className   = 'status-dot err';
+      label.textContent = 'Error: ' + (s.error || 'unknown');
+    } else {
+      dot.className   = 'status-dot';
+      label.textContent = 'Connecting…';
+    }
+  } catch(e) {/* ignore */}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Auto-refresh countdown
+// ─────────────────────────────────────────────────────────────────────────────
+function resetCountdown() {
+  countdown = 30;
+}
+
+function tick() {
+  countdown--;
+  $('next-refresh').textContent = countdown;
+  if (countdown <= 0) {
+    loadData();
+    pollStatus();
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Range selector
+// ─────────────────────────────────────────────────────────────────────────────
+$('range-select').addEventListener('change', loadData);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Init
+// ─────────────────────────────────────────────────────────────────────────────
+(async () => {
+  await loadConfig();
+  await loadData();
+  await pollStatus();
+  setInterval(tick, 1000);
+  setInterval(pollStatus, 15000);
+})();
+</script>
+</body>
+</html>
