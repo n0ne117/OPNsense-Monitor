@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -38,7 +37,8 @@ _DEFAULT_CONFIG: dict = {
     "host":         os.environ.get("OPNSENSE_HOST",       "https://192.168.1.1"),
     "api_key":      os.environ.get("OPNSENSE_API_KEY",    ""),
     "api_secret":   os.environ.get("OPNSENSE_API_SECRET", ""),
-    "interface":    os.environ.get("OPNSENSE_INTERFACE",  "em0"),
+    # Leave empty to auto-resolve from gateway's 'if' field
+    "interface":    os.environ.get("OPNSENSE_INTERFACE",  ""),
     "gateway":      os.environ.get("OPNSENSE_GATEWAY",    ""),
     "verify_ssl":   os.environ.get("OPNSENSE_VERIFY_SSL", "false").lower() == "true",
     "poll_interval": int(os.environ.get("POLL_INTERVAL", "60")),
@@ -67,11 +67,14 @@ def _save_config(cfg: dict):
 _config: dict = _load_config()
 
 # ---------------------------------------------------------------------------
-# Background polling
+# Background polling state
 # ---------------------------------------------------------------------------
 _collector: Optional[OPNsenseCollector] = None
 _poll_task: Optional[asyncio.Task] = None
 _status: dict = {"ok": None, "error": None, "last_poll": None}
+
+# The actual BSD kernel interface name used for bandwidth (may be auto-resolved)
+_active_interface: str = _config.get("interface", "")
 
 
 def _make_collector() -> OPNsenseCollector:
@@ -83,20 +86,44 @@ def _make_collector() -> OPNsenseCollector:
     )
 
 
-async def _poll_once(col: OPNsenseCollector):
-    global _status
-    try:
-        # Bandwidth
-        bw = await col.get_bandwidth(_config["interface"])
-        if bw is not None:
-            insert_bandwidth(_config["interface"], bw[0], bw[1])
-            logger.info(
-                "BW %s: ↓ %.2f Mbps  ↑ %.2f Mbps",
-                _config["interface"], bw[0] / 1e6, bw[1] / 1e6,
-            )
+def _resolve_interface_from_gateways(gateways: list[dict]) -> str:
+    """
+    Given the live gateway list, return the BSD interface name to use for
+    bandwidth monitoring.
 
-        # Gateways
+    Priority:
+      1. Explicit override in config['interface']
+      2. bsd_if extracted from the configured gateway's 'if' API field
+      3. bsd_if from the first gateway that has one
+    """
+    # Explicit override always wins
+    manual = _config.get("interface", "").strip()
+    if manual:
+        return manual
+
+    target = _config.get("gateway", "").strip()
+
+    # Try the configured gateway first
+    if target:
+        for gw in gateways:
+            if gw["name"] == target and gw.get("bsd_if"):
+                return gw["bsd_if"]
+
+    # Fall back to any gateway that has a bsd_if
+    for gw in gateways:
+        if gw.get("bsd_if"):
+            return gw["bsd_if"]
+
+    return ""
+
+
+async def _poll_once(col: OPNsenseCollector):
+    global _status, _active_interface
+
+    try:
+        # ── 1. Gateway status (RTT / RTTd / loss + interface resolution) ──
         gateways = await col.get_gateway_status()
+
         target_gw = _config.get("gateway", "")
         for gw in gateways:
             if gw["rtt_ms"] is not None:
@@ -108,11 +135,37 @@ async def _poll_once(col: OPNsenseCollector):
                         gw.get("loss_pct", 0.0),
                     )
                     logger.info(
-                        "GW %s: rtt=%.2f ms  rttd=%s ms  loss=%.1f%%",
-                        gw["name"], gw["rtt_ms"],
+                        "GW %s (%s): rtt=%.2f ms  rttd=%s ms  loss=%.1f%%",
+                        gw["name"],
+                        gw.get("address", ""),
+                        gw["rtt_ms"],
                         f"{gw['rttd_ms']:.2f}" if gw.get("rttd_ms") is not None else "n/a",
                         gw.get("loss_pct") or 0,
                     )
+
+        # ── 2. Resolve BSD interface for bandwidth ──────────────────────────
+        resolved = _resolve_interface_from_gateways(gateways)
+        if resolved and resolved != _active_interface:
+            logger.info(
+                "Active interface: %r → %r (auto-resolved from gateway)",
+                _active_interface, resolved,
+            )
+        _active_interface = resolved
+
+        # ── 3. Bandwidth ────────────────────────────────────────────────────
+        if _active_interface:
+            bw = await col.get_bandwidth(_active_interface)
+            if bw is not None:
+                insert_bandwidth(_active_interface, bw[0], bw[1])
+                logger.info(
+                    "BW %s: ↓ %.2f Mbps  ↑ %.2f Mbps",
+                    _active_interface, bw[0] / 1e6, bw[1] / 1e6,
+                )
+        else:
+            logger.warning(
+                "No interface configured and could not auto-resolve from gateways. "
+                "Set 'gateway' in Settings (e.g. Port2_WAN) or specify 'interface' explicitly."
+            )
 
         _status = {"ok": True, "error": None, "last_poll": time.time()}
 
@@ -130,10 +183,12 @@ async def _poll_loop():
 
 
 def _restart_poll():
-    global _poll_task, _collector
+    global _poll_task, _collector, _active_interface
     if _poll_task and not _poll_task.done():
         _poll_task.cancel()
     _collector = None
+    # Reset resolved interface so it gets re-resolved after config change
+    _active_interface = _config.get("interface", "")
     _poll_task = asyncio.create_task(_poll_loop())
 
 
@@ -166,7 +221,6 @@ class ConfigUpdate(BaseModel):
 
 
 def _safe_config() -> dict:
-    """Return config with secret masked."""
     c = _config.copy()
     if c.get("api_secret"):
         c["api_secret"] = "••••••••"
@@ -175,7 +229,11 @@ def _safe_config() -> dict:
 
 @app.get("/api/status")
 async def api_status():
-    return {"poll_status": _status, "config": _safe_config()}
+    return {
+        "poll_status":        _status,
+        "config":             _safe_config(),
+        "active_interface":   _active_interface,
+    }
 
 
 @app.get("/api/config")
@@ -187,7 +245,6 @@ async def api_get_config():
 async def api_set_config(update: ConfigUpdate):
     global _config
     patch = update.model_dump(exclude_none=True)
-    # Never overwrite the stored secret with the mask placeholder
     if patch.get("api_secret") == "••••••••":
         patch.pop("api_secret")
     _config.update(patch)
@@ -199,12 +256,14 @@ async def api_set_config(update: ConfigUpdate):
 @app.get("/api/data")
 async def api_data(hours: float = 24):
     since = time.time() - hours * 3600
-    bandwidth = get_bandwidth_history(_config["interface"], since)
+
+    # Use the actively-resolved interface for bandwidth lookup
+    iface = _active_interface or _config.get("interface", "")
+    bandwidth = get_bandwidth_history(iface, since) if iface else []
 
     target_gw = _config.get("gateway", "")
     raw_gw = get_gateway_history(target_gw or None, since)
 
-    # Group by gateway name
     gw_grouped: dict[str, list] = {}
     for row in raw_gw:
         name = row["gateway"]
@@ -214,8 +273,8 @@ async def api_data(hours: float = 24):
         "bandwidth": bandwidth,
         "gateways":  gw_grouped,
         "meta": {
-            "interface":     _config["interface"],
-            "target_gateway": target_gw,
+            "active_interface":  iface,
+            "target_gateway":    target_gw,
             "stored_interfaces": get_stored_interfaces(),
             "stored_gateways":   get_stored_gateways(),
         },
@@ -235,6 +294,21 @@ async def api_gateways_live():
         raise HTTPException(503, "Collector not ready")
     gateways = await _collector.get_gateway_status()
     return {"gateways": gateways}
+
+
+@app.get("/api/debug/iface-stats")
+async def api_debug_iface_stats():
+    """
+    Returns the raw OPNsense interface statistics response.
+    Useful for diagnosing bandwidth collection issues (field names, interface names).
+    """
+    if _collector is None:
+        raise HTTPException(503, "Collector not ready")
+    try:
+        raw = await _collector.get_raw_interface_stats()
+        return {"raw": raw, "active_interface": _active_interface}
+    except Exception as exc:
+        raise HTTPException(500, str(exc))
 
 
 # ---------------------------------------------------------------------------

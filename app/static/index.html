@@ -200,6 +200,8 @@
     <div class="logo">OPN<span>sense</span> Monitor</div>
     <div class="status-dot" id="status-dot"></div>
     <div class="status-label" id="status-label">connecting…</div>
+    <div class="status-label" id="iface-label" style="display:none; color: var(--muted)">·</div>
+    <div class="status-label" id="iface-badge" style="display:none; font-family: monospace; color: var(--teal);"></div>
   </div>
   <div class="header-right">
     <select class="range-select" id="range-select" title="Time range">
@@ -238,12 +240,12 @@
           <input id="cfg-secret" type="password" placeholder="your_api_secret"/>
         </div>
         <div class="field">
-          <label>WAN Interface</label>
-          <input id="cfg-iface" type="text" placeholder="em0 / igb0 / vtnet0"/>
+          <label>Gateway Name</label>
+          <input id="cfg-gw" type="text" placeholder="Port2_WAN / WAN_DHCP"/>
         </div>
         <div class="field">
-          <label>Gateway (leave empty = all)</label>
-          <input id="cfg-gw" type="text" placeholder="WAN_DHCP"/>
+          <label>Interface Override <span style="font-weight:400; color:var(--muted)">(optional)</span></label>
+          <input id="cfg-iface" type="text" placeholder="Auto-resolved from gateway"/>
         </div>
         <div class="field">
           <label>Poll Interval (seconds)</label>
@@ -259,7 +261,8 @@
       </div>
       <div class="config-actions">
         <button class="btn primary" onclick="saveConfig()">Save &amp; Apply</button>
-        <button class="btn" onclick="fetchInterfaces()">Detect Interfaces</button>
+        <button class="btn" onclick="listGateways()">List Gateways</button>
+        <button class="btn" onclick="fetchInterfaces()">List Interfaces</button>
         <span id="save-msg">✓ Saved</span>
       </div>
     </div>
@@ -301,7 +304,7 @@
     <!-- Bandwidth -->
     <div class="chart-card">
       <div class="chart-title">
-        Bandwidth
+        Bandwidth <span id="bw-iface-label" style="font-weight:400; color:var(--teal); margin-left:6px; font-family:monospace; font-size:11px;"></span>
         <div class="chart-legend">
           <div class="legend-item"><div class="legend-dot" style="background:#39d0d4"></div>Download</div>
           <div class="legend-item"><div class="legend-dot" style="background:#a371f7"></div>Upload</div>
@@ -725,11 +728,11 @@ async function loadConfig() {
   try {
     const r = await fetch('/api/config');
     const c = await r.json();
-    $('cfg-host').value     = c.host     || '';
-    $('cfg-key').value      = c.api_key  || '';
-    // Don't populate secret (masked)
-    $('cfg-iface').value    = c.interface || '';
-    $('cfg-gw').value       = c.gateway   || '';
+    $('cfg-host').value     = c.host          || '';
+    $('cfg-key').value      = c.api_key       || '';
+    // Don't populate secret (masked on server)
+    $('cfg-gw').value       = c.gateway       || '';
+    $('cfg-iface').value    = c.interface     || '';
     $('cfg-interval').value = c.poll_interval || 60;
     $('cfg-ssl').value      = c.verify_ssl ? 'true' : 'false';
   } catch(e) { console.error('loadConfig', e); }
@@ -766,9 +769,24 @@ async function fetchInterfaces() {
     const r = await fetch('/api/interfaces');
     const d = await r.json();
     if (d.interfaces && d.interfaces.length) {
-      alert('Available interfaces:\n' + d.interfaces.join('\n'));
+      alert('Available BSD interfaces:\n' + d.interfaces.join('\n'));
     } else {
       alert('No interfaces found (check connection settings).');
+    }
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function listGateways() {
+  try {
+    const r = await fetch('/api/gateways-live');
+    const d = await r.json();
+    if (d.gateways && d.gateways.length) {
+      const lines = d.gateways.map(g =>
+        `${g.name}  (${g.address})  bsd_if=${g.bsd_if || '?'}  status=${g.status_text}`
+      );
+      alert('Available gateways:\n\n' + lines.join('\n'));
+    } else {
+      alert('No gateways found (check connection settings).');
     }
   } catch(e) { alert('Error: ' + e.message); }
 }
@@ -788,14 +806,27 @@ async function pollStatus() {
     const dot   = $('status-dot');
     const label = $('status-label');
     if (s.ok === true) {
-      dot.className   = 'status-dot ok';
+      dot.className     = 'status-dot ok';
       label.textContent = 'Connected';
     } else if (s.ok === false) {
-      dot.className   = 'status-dot err';
+      dot.className     = 'status-dot err';
       label.textContent = 'Error: ' + (s.error || 'unknown');
     } else {
-      dot.className   = 'status-dot';
+      dot.className     = 'status-dot';
       label.textContent = 'Connecting…';
+    }
+
+    // Show resolved BSD interface in header
+    const iface = d.active_interface || '';
+    if (iface) {
+      $('iface-label').style.display = '';
+      $('iface-badge').style.display = '';
+      $('iface-badge').textContent   = iface;
+      $('bw-iface-label').textContent = '(' + iface + ')';
+    } else {
+      $('iface-label').style.display = 'none';
+      $('iface-badge').style.display = 'none';
+      $('bw-iface-label').textContent = '';
     }
   } catch(e) {/* ignore */}
 }
