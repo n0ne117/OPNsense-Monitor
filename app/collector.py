@@ -107,6 +107,38 @@ class OPNsenseCollector:
             logger.warning("Could not fetch interfaces: %s", exc)
             return []
 
+    @staticmethod
+    def _find_stats_key(stats: dict, interface: str) -> Optional[str]:
+        """
+        OPNsense returns composite stat keys such as:
+          '[Port2_WAN] (ix1) / 203.0.113.10'
+          '[Port2_WAN] (ix1) / aa:bb:cc:dd:ee:ff'
+        Given a BSD interface name like 'ix1', find the best matching key.
+        Prefers the key that contains an IPv4 address (actual routed traffic).
+        Falls back to any key containing the name.
+        """
+        # Exact match (plain BSD name as key — older OPNsense versions)
+        if interface in stats:
+            return interface
+
+        ip_re = re.compile(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}')
+
+        # Keys that contain (interface) or [interface]
+        matches = [
+            k for k in stats
+            if f"({interface})" in k or f"[{interface}]" in k or f"/{interface}" in k
+        ]
+        if not matches:
+            # Broad fallback: key contains the name anywhere
+            matches = [k for k in stats if interface in k]
+
+        if not matches:
+            return None
+
+        # Among matches prefer the one with an IPv4 address
+        ip_matches = [k for k in matches if ip_re.search(k)]
+        return ip_matches[0] if ip_matches else matches[0]
+
     async def get_bandwidth(self, interface: str) -> Optional[tuple[float, float]]:
         """
         Returns (bps_in, bps_out) calculated from cumulative byte counters,
@@ -115,23 +147,25 @@ class OPNsenseCollector:
         try:
             data = await self.get_raw_interface_stats()
             stats = data.get("statistics") or {}
-            iface = stats.get(interface)
 
-            if iface is None:
+            key = self._find_stats_key(stats, interface)
+            if key is None:
                 available = list(stats.keys())
                 logger.warning(
-                    "Interface %r not found in statistics. Available: %s\n"
-                    "First entry sample: %s",
-                    interface,
-                    available,
-                    dict(list(stats.values())[0]) if stats else "empty",
+                    "Interface %r not found in statistics. Available: %s",
+                    interface, available,
                 )
                 return None
+
+            if key != interface:
+                logger.debug("Interface %r matched stats key %r", interface, key)
+
+            iface = stats[key]
 
             # Log field names on first call so users can debug mismatches
             if interface not in self._prev:
                 logger.info(
-                    "Interface %r fields: %s", interface, list(iface.keys())
+                    "Interface %r (key=%r) fields: %s", interface, key, list(iface.keys())
                 )
 
             # Try every known field-name variant for byte counters

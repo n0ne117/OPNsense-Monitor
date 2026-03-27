@@ -39,7 +39,7 @@ _DEFAULT_CONFIG: dict = {
     "api_secret":   os.environ.get("OPNSENSE_API_SECRET", ""),
     # Leave empty to auto-resolve from gateway's 'if' field
     "interface":    os.environ.get("OPNSENSE_INTERFACE",  ""),
-    "gateway":      os.environ.get("OPNSENSE_GATEWAY",    ""),
+    "gateway":      os.environ.get("OPNSENSE_GATEWAY",    "WAN_DHCP"),
     "verify_ssl":   os.environ.get("OPNSENSE_VERIFY_SSL", "false").lower() == "true",
     "poll_interval": int(os.environ.get("POLL_INTERVAL", "60")),
 }
