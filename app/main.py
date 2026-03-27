@@ -13,6 +13,8 @@ from pydantic import BaseModel
 
 from collector import OPNsenseCollector
 from database import (
+    compute_daily_from_bandwidth,
+    compute_hourly_from_bandwidth,
     get_bandwidth_history,
     get_daily_totals,
     get_gateway_history,
@@ -307,8 +309,10 @@ async def api_usage_summary():
     import datetime
     now = datetime.datetime.now()
     return {
-        "hourly":  get_usage_summary("hourly"),
-        "daily":   get_usage_summary("daily"),
+        # Hourly + daily: computed live from the bandwidth table — no warm-up needed
+        "hourly":  compute_hourly_from_bandwidth(),
+        "daily":   compute_daily_from_bandwidth(),
+        # Monthly + yearly: accumulated persistently; builds up over time
         "monthly": get_usage_summary("monthly"),
         "yearly":  get_usage_summary("yearly"),
         "current_keys": {

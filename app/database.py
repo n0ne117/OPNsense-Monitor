@@ -129,6 +129,62 @@ def update_usage_summary(bytes_in: float, bytes_out: float):
         conn.commit()
 
 
+def compute_hourly_from_bandwidth() -> list[dict]:
+    """
+    Compute per-hour totals by integrating bps rates stored in the bandwidth
+    table (covers the last 24 h). Works immediately — no warm-up needed.
+    """
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT timestamp, bps_in, bps_out FROM bandwidth ORDER BY timestamp"
+        ).fetchall()
+
+    buckets: dict[str, dict] = {}
+    for i in range(1, len(rows)):
+        dt = rows[i]["timestamp"] - rows[i - 1]["timestamp"]
+        if dt <= 0 or dt > 7200:   # skip gaps > 2 h (e.g. after restart)
+            continue
+        bi = rows[i]["bps_in"]  * dt / 8
+        bo = rows[i]["bps_out"] * dt / 8
+        key = datetime.datetime.fromtimestamp(rows[i]["timestamp"]).strftime("%Y-%m-%d %H")
+        if key not in buckets:
+            buckets[key] = {"period_key": key, "bytes_in": 0.0, "bytes_out": 0.0}
+        buckets[key]["bytes_in"]  += bi
+        buckets[key]["bytes_out"] += bo
+
+    return sorted(buckets.values(), key=lambda x: x["period_key"], reverse=True)
+
+
+def compute_daily_from_bandwidth() -> list[dict]:
+    """
+    Compute per-day totals from the bandwidth table for recent days,
+    merged with the persistent usage_summary for days older than 24 h.
+    """
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT timestamp, bps_in, bps_out FROM bandwidth ORDER BY timestamp"
+        ).fetchall()
+
+    recent: dict[str, dict] = {}
+    for i in range(1, len(rows)):
+        dt = rows[i]["timestamp"] - rows[i - 1]["timestamp"]
+        if dt <= 0 or dt > 7200:
+            continue
+        bi = rows[i]["bps_in"]  * dt / 8
+        bo = rows[i]["bps_out"] * dt / 8
+        key = datetime.datetime.fromtimestamp(rows[i]["timestamp"]).strftime("%Y-%m-%d")
+        if key not in recent:
+            recent[key] = {"period_key": key, "bytes_in": 0.0, "bytes_out": 0.0}
+        recent[key]["bytes_in"]  += bi
+        recent[key]["bytes_out"] += bo
+
+    # Merge: stored rows for older days, freshly-computed for recent days
+    merged: dict[str, dict] = {r["period_key"]: dict(r)
+                                for r in get_usage_summary("daily")}
+    merged.update(recent)   # recent always wins
+    return sorted(merged.values(), key=lambda x: x["period_key"], reverse=True)
+
+
 def get_usage_summary(period_type: str) -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute(
