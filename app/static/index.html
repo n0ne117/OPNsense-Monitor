@@ -1029,6 +1029,7 @@ function tick() {
   if (countdown <= 0) {
     loadData();
     pollStatus();
+    if (activeView === 'summary') loadSummary();
   }
 }
 
@@ -1104,7 +1105,7 @@ function renderSummaryTable(data) {
   const wrap     = $('summary-table-wrap');
 
   if (!rows.length) {
-    wrap.innerHTML = '<div class="summary-empty">No data yet — usage accumulates as the poller runs.</div>';
+    wrap.innerHTML = '<div class="summary-empty">No data yet — appears after the second poll cycle (≈ 2× poll interval).</div>';
     return;
   }
 
