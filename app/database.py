@@ -109,6 +109,36 @@ def get_gateway_history(gateway: str | None = None, since: float | None = None) 
     return [dict(r) for r in rows]
 
 
+def get_daily_totals(interface: str) -> dict:
+    """
+    Return total bytes in/out since midnight (local time) today.
+    Computed by integrating the stored bps rates over their intervals.
+    Resets automatically at 00:00 each day.
+    """
+    import datetime
+    now = datetime.datetime.now()
+    midnight = datetime.datetime(now.year, now.month, now.day).timestamp()
+
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT timestamp, bps_in, bps_out FROM bandwidth "
+            "WHERE interface=? AND timestamp>=? ORDER BY timestamp",
+            (interface, midnight),
+        ).fetchall()
+
+    if len(rows) < 2:
+        return {"bytes_in": 0.0, "bytes_out": 0.0, "since": midnight}
+
+    total_in = total_out = 0.0
+    for i in range(1, len(rows)):
+        dt = rows[i]["timestamp"] - rows[i - 1]["timestamp"]
+        # bps_in represents the rate during the interval ending at rows[i]
+        total_in  += rows[i]["bps_in"]  * dt / 8
+        total_out += rows[i]["bps_out"] * dt / 8
+
+    return {"bytes_in": total_in, "bytes_out": total_out, "since": midnight}
+
+
 def get_stored_interfaces() -> list[str]:
     with get_conn() as conn:
         rows = conn.execute("SELECT DISTINCT interface FROM bandwidth").fetchall()

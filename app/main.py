@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from collector import OPNsenseCollector
 from database import (
     get_bandwidth_history,
+    get_daily_totals,
     get_gateway_history,
     get_stored_gateways,
     get_stored_interfaces,
@@ -270,8 +271,9 @@ async def api_data(hours: float = 24):
         gw_grouped.setdefault(name, []).append(row)
 
     return {
-        "bandwidth": bandwidth,
-        "gateways":  gw_grouped,
+        "bandwidth":    bandwidth,
+        "gateways":     gw_grouped,
+        "daily_totals": get_daily_totals(iface) if iface else {"bytes_in": 0.0, "bytes_out": 0.0},
         "meta": {
             "active_interface":  iface,
             "target_gateway":    target_gw,

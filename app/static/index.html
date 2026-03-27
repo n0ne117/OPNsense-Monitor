@@ -296,6 +296,18 @@
       <div class="kpi-unit">%</div>
       <div class="kpi-sub" id="kpi-loss-abs"></div>
     </div>
+    <div class="kpi" style="--kpi-color: #39d0d4; opacity:.75">
+      <div class="kpi-label">Today's Download</div>
+      <div class="kpi-value" id="kpi-dl-day">—</div>
+      <div class="kpi-unit" id="kpi-dl-day-unit">GB</div>
+      <div class="kpi-sub" id="kpi-dl-day-reset">resets at 00:00</div>
+    </div>
+    <div class="kpi" style="--kpi-color: #a371f7; opacity:.75">
+      <div class="kpi-label">Today's Upload</div>
+      <div class="kpi-value" id="kpi-ul-day">—</div>
+      <div class="kpi-unit" id="kpi-ul-day-unit">GB</div>
+      <div class="kpi-sub">resets at 00:00</div>
+    </div>
   </div>
 
   <!-- Charts -->
@@ -375,6 +387,14 @@ function fmtBps(bps) {
 function fmtMs(ms) {
   if (ms == null || isNaN(ms)) return '—';
   return ms.toFixed(2);
+}
+
+function fmtBytes(bytes) {
+  if (bytes == null || isNaN(bytes) || bytes === 0) return { val: '0.00', unit: 'MB' };
+  if (bytes >= 1e12) return { val: (bytes / 1e12).toFixed(2), unit: 'TB' };
+  if (bytes >= 1e9)  return { val: (bytes / 1e9).toFixed(2),  unit: 'GB' };
+  if (bytes >= 1e6)  return { val: (bytes / 1e6).toFixed(2),  unit: 'MB' };
+  return               { val: (bytes / 1e3).toFixed(1),  unit: 'KB' };
 }
 
 function bpsLabel(bps) {
@@ -633,10 +653,20 @@ async function loadData() {
 
 function renderAll(d) {
   renderBandwidth(d.bandwidth || []);
+  renderDailyTotals(d.daily_totals || {});
   allGwData = d.gateways || {};
   renderGatewayTabs();
   renderGatewayCharts();
   $('last-update').textContent = 'Last updated: ' + new Date().toLocaleTimeString();
+}
+
+function renderDailyTotals(t) {
+  const dl = fmtBytes(t.bytes_in);
+  const ul = fmtBytes(t.bytes_out);
+  $('kpi-dl-day').textContent      = dl.val;
+  $('kpi-dl-day-unit').textContent = dl.unit;
+  $('kpi-ul-day').textContent      = ul.val;
+  $('kpi-ul-day-unit').textContent = ul.unit;
 }
 
 function renderBandwidth(rows) {
