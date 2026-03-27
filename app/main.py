@@ -95,6 +95,9 @@ DNS_TTL = 300.0  # 5 minutes
 # Per-IP rate history: ip -> deque of (timestamp, combined_rate_bps)
 _talker_history: dict[str, deque] = {}
 
+# Last interface name that actually returned top-talker records (cached for speed)
+_top_talker_working_iface: str = ""
+
 
 def _make_collector() -> OPNsenseCollector:
     return OPNsenseCollector(
@@ -209,12 +212,13 @@ async def _poll_loop():
 
 
 def _restart_poll():
-    global _poll_task, _collector, _active_interface, _active_opn_interface
+    global _poll_task, _collector, _active_interface, _active_opn_interface, _top_talker_working_iface
     if _poll_task and not _poll_task.done():
         _poll_task.cancel()
     _collector = None
     _active_interface = _config.get("interface", "")
     _active_opn_interface = ""
+    _top_talker_working_iface = ""
     _poll_task = asyncio.create_task(_poll_loop())
 
 
@@ -368,18 +372,46 @@ async def api_top_talkers():
     Returns the current top bandwidth users on the active WAN interface.
     Includes per-host 1-minute rate history to identify sustained top users.
     """
+    global _top_talker_working_iface
+
     if _collector is None or not _active_interface:
         return {"talkers": [], "top_ip": None, "second_ip": None}
 
-    # Prefer the logical OPNsense interface name (e.g. "wan"); the traffic/top
-    # endpoint expects logical names and keys its response by them.
-    # Fall back to the BSD name if the logical name hasn't been resolved yet.
-    iface_for_top = _active_opn_interface or _active_interface
-    try:
-        records = await _collector.get_top_talkers(iface_for_top, limit=10)
-    except Exception as exc:
-        logger.warning("Top talkers fetch failed: %s", exc)
-        return {"talkers": [], "top_ip": None, "second_ip": None}
+    # The OPNsense traffic/top API endpoint accepts OPNsense logical interface
+    # names (e.g. "wan", "opt1").  The BSD name (e.g. "ix1") may also work on
+    # some builds and is kept as a fallback.  Once a name returns records we
+    # cache it to avoid redundant probing on subsequent calls.
+    candidates: list[str] = []
+    if _top_talker_working_iface:
+        candidates.append(_top_talker_working_iface)
+    if _active_opn_interface and _active_opn_interface not in candidates:
+        candidates.append(_active_opn_interface)
+    if _active_interface not in candidates:
+        candidates.append(_active_interface)
+
+    records: list[dict] = []
+    iface_used = candidates[0] if candidates else _active_interface
+    for candidate in candidates:
+        try:
+            result = await _collector.get_top_talkers(candidate, limit=10)
+            logger.debug(
+                "Top talkers probe: iface=%r → %d records", candidate, len(result)
+            )
+            if result:
+                records = result
+                iface_used = candidate
+                if _top_talker_working_iface != candidate:
+                    logger.info("Top talkers: using interface %r", candidate)
+                    _top_talker_working_iface = candidate
+                break
+        except Exception as exc:
+            logger.warning("Top talkers fetch failed (iface=%r): %s", candidate, exc)
+
+    if not records:
+        logger.debug(
+            "Top talkers: no records from any candidate %s (opn=%r bsd=%r)",
+            candidates, _active_opn_interface, _active_interface,
+        )
 
     now = time.time()
 
@@ -434,6 +466,40 @@ async def api_debug_iface_stats():
         return {"raw": raw, "active_interface": _active_interface}
     except Exception as exc:
         raise HTTPException(500, str(exc))
+
+
+@app.get("/api/debug/top-talkers-raw")
+async def api_debug_top_talkers_raw():
+    """
+    Returns the raw OPNsense response for the traffic/top endpoint for each
+    candidate interface name.  Use this to diagnose why top talkers may not
+    be showing: check which interface names return records and what fields
+    the records contain.
+    """
+    if _collector is None:
+        raise HTTPException(503, "Collector not ready")
+
+    candidates = list(dict.fromkeys(filter(None, [
+        _active_opn_interface,
+        _active_interface,
+    ])))
+    if not candidates:
+        return {"error": "no active interface resolved yet", "candidates": []}
+
+    results = []
+    for iface in candidates:
+        try:
+            raw = await _collector.get_top_talkers_raw(iface)
+        except Exception as exc:
+            raw = {"interface_used": iface, "error": str(exc)}
+        results.append(raw)
+
+    return {
+        "active_bsd_interface": _active_interface,
+        "active_opn_interface": _active_opn_interface,
+        "working_cache":        _top_talker_working_iface,
+        "probes":               results,
+    }
 
 
 # ---------------------------------------------------------------------------

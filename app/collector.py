@@ -144,6 +144,20 @@ class OPNsenseCollector:
         ip_matches = [k for k in matches if ip_re.search(k)]
         return ip_matches[0] if ip_matches else matches[0]
 
+    async def get_top_talkers_raw(self, interface: str) -> dict:
+        """
+        Returns the raw OPNsense response for /api/diagnostics/traffic/top/{interface}
+        alongside the interface name and response type — useful for diagnostics.
+        """
+        async with self._client() as c:
+            r = await c.get(f"{self.base_url}/api/diagnostics/traffic/top/{interface}")
+            status = r.status_code
+            try:
+                body = r.json()
+            except Exception as exc:
+                body = {"parse_error": str(exc), "raw_text": r.text[:2000]}
+        return {"interface_used": interface, "http_status": status, "body": body}
+
     async def get_top_talkers(self, interface: str, limit: int = 10) -> list[dict]:
         """
         Returns current top bandwidth users via /api/diagnostics/traffic/top/{interface}.
@@ -169,7 +183,12 @@ class OPNsenseCollector:
             except (ValueError, TypeError):
                 return 0
 
-        # Normalise response into a flat list regardless of wrapping format
+        # Normalise response into a flat list regardless of wrapping format.
+        # OPNsense may return:
+        #   - a list of records directly (some builds / when BSD name is passed)
+        #   - {"wan": {"status":"ok","records":[...]}} keyed by logical iface name
+        #   - {"records": [...]} flat dict
+        #   - a string like "endpoint not found" or "timeout"
         records_raw: list = []
         if isinstance(data, list):
             records_raw = data
@@ -181,6 +200,7 @@ class OPNsenseCollector:
                 for iface_data in data.values():
                     if isinstance(iface_data, dict) and "records" in iface_data:
                         records_raw.extend(iface_data.get("records") or [])
+        # str / anything else → empty list (e.g. "endpoint not found")
 
         result = []
         for rec in records_raw:
