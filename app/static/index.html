@@ -162,6 +162,32 @@
   }
   .gw-tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
 
+  /* ── Alert banner ─────────────────────────────── */
+  .alert-banner {
+    display: none;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 18px;
+    border-radius: 8px;
+    border: 1px solid;
+    margin-bottom: 18px;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .alert-banner.warning {
+    display: flex;
+    background: rgba(210,153,34,.12);
+    border-color: var(--yellow);
+    color: var(--yellow);
+  }
+  .alert-banner.critical {
+    display: flex;
+    background: rgba(248,81,73,.12);
+    border-color: var(--red);
+    color: var(--red);
+  }
+  .alert-icon { font-size: 16px; flex-shrink: 0; }
+
   /* ── No-data overlay ──────────────────────────── */
   .no-data {
     position: absolute; inset: 0;
@@ -266,6 +292,12 @@
         <span id="save-msg">✓ Saved</span>
       </div>
     </div>
+  </div>
+
+  <!-- Alert banner -->
+  <div class="alert-banner" id="alert-banner">
+    <span class="alert-icon" id="alert-icon"></span>
+    <span id="alert-text"></span>
   </div>
 
   <!-- KPI row -->
@@ -757,6 +789,20 @@ function renderGatewayCharts(hours) {
     const lossKpi = document.querySelector('[style="--kpi-color: #f85149"]');
     if (lossKpi) {
       lossKpi.style.setProperty('--kpi-color', lp === 0 ? '#3fb950' : lp < 5 ? '#d29922' : '#f85149');
+    }
+
+    // Alert banner
+    const rtt = last.rtt_ms ?? 0;
+    const banner = $('alert-banner');
+    const isCritical = rtt >= 80 || lp >= 4;
+    const isWarning  = !isCritical && (rtt >= 50 || lp >= 1);
+    banner.className = 'alert-banner' + (isCritical ? ' critical' : isWarning ? ' warning' : '');
+    if (isCritical) {
+      $('alert-icon').textContent = '🔴';
+      $('alert-text').textContent = 'Critical: Internet connection currently very unstable or saturated!';
+    } else if (isWarning) {
+      $('alert-icon').textContent = '⚠️';
+      $('alert-text').textContent = 'Warning: Internet connection is currently unstable!';
     }
   }
 }
