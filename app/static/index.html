@@ -612,7 +612,8 @@ const lossChart = new Chart(lossCtx, {
 let activeGw = null;
 let allGwData = {};
 let refreshTimer = null;
-let countdown = 30;
+let pollInterval = 60;
+let countdown = pollInterval;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Load & render
@@ -735,6 +736,7 @@ async function loadConfig() {
     $('cfg-iface').value    = c.interface     || '';
     $('cfg-interval').value = c.poll_interval || 60;
     $('cfg-ssl').value      = c.verify_ssl ? 'true' : 'false';
+    pollInterval = parseInt(c.poll_interval) || 60;
   } catch(e) { console.error('loadConfig', e); }
 }
 
@@ -835,7 +837,7 @@ async function pollStatus() {
 // Auto-refresh countdown
 // ─────────────────────────────────────────────────────────────────────────────
 function resetCountdown() {
-  countdown = 30;
+  countdown = pollInterval;
 }
 
 function tick() {
