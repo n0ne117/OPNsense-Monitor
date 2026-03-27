@@ -144,6 +144,46 @@ class OPNsenseCollector:
         ip_matches = [k for k in matches if ip_re.search(k)]
         return ip_matches[0] if ip_matches else matches[0]
 
+    async def get_top_talkers(self, interface: str, limit: int = 10) -> list[dict]:
+        """
+        Returns current top bandwidth users via /api/diagnostics/traffic/top/{interface}.
+        Sorted by combined rate descending.
+        Each entry: {address, rate_bits_in, rate_bits_out, bytes_in, bytes_out, hostname}
+        """
+        async with self._client() as c:
+            r = await c.get(f"{self.base_url}/api/diagnostics/traffic/top/{interface}")
+            r.raise_for_status()
+            data = r.json()
+
+        def _int(v):
+            try:
+                return int(float(str(v or 0)))
+            except (ValueError, TypeError):
+                return 0
+
+        records = data.get("records") or []
+        result = []
+        for rec in records:
+            address = (rec.get("address") or rec.get("src") or "").strip()
+            if not address:
+                continue
+            rate_in  = _int(rec.get("rate_bits_in")  or rec.get("rate_in")  or 0)
+            rate_out = _int(rec.get("rate_bits_out") or rec.get("rate_out") or 0)
+            bytes_in  = _int(rec.get("cumulative_bytes_in")  or rec.get("bytes_in")  or 0)
+            bytes_out = _int(rec.get("cumulative_bytes_out") or rec.get("bytes_out") or 0)
+            hostname  = (rec.get("hostname") or rec.get("host") or "").strip()
+            result.append({
+                "address":       address,
+                "rate_bits_in":  rate_in,
+                "rate_bits_out": rate_out,
+                "bytes_in":      bytes_in,
+                "bytes_out":     bytes_out,
+                "hostname":      hostname,
+            })
+
+        result.sort(key=lambda x: x["rate_bits_in"] + x["rate_bits_out"], reverse=True)
+        return result[:limit]
+
     async def get_bandwidth(self, interface: str) -> Optional[tuple[float, float]]:
         """
         Returns (bps_in, bps_out) calculated from cumulative byte counters,

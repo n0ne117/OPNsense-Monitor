@@ -263,6 +263,63 @@
     padding: 40px; text-align: center; color: var(--muted); font-size: 13px;
   }
 
+  /* ── Top Talkers strip ────────────────────────── */
+  .top-talkers {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 20px;
+    align-items: stretch;
+  }
+  .talker-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 9px 14px;
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    position: relative;
+    overflow: hidden;
+    transition: border-color 0.2s;
+  }
+  .talker-card::before {
+    content: '';
+    position: absolute; top: 0; left: 0; right: 0; height: 2px;
+    background: transparent;
+  }
+  .talker-card.rank-1 { border-color: rgba(240,168,0,.45); }
+  .talker-card.rank-1::before { background: #f0a800; }
+  .talker-card.rank-2 { border-color: rgba(139,156,172,.4); }
+  .talker-card.rank-2::before { background: #8b9cac; }
+  .talker-badge {
+    font-size: 11px;
+    flex-shrink: 0;
+    line-height: 1;
+  }
+  .talker-name {
+    font-size: 12px;
+    font-family: monospace;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
+    min-width: 0;
+  }
+  .talker-rates {
+    display: flex;
+    gap: 8px;
+    font-size: 12px;
+    white-space: nowrap;
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+  }
+  .t-dl    { color: var(--teal); }
+  .t-ul    { color: var(--purple); }
+  .t-bytes { color: var(--muted); font-size: 11px; }
+
   /* ── No-data overlay ──────────────────────────── */
   .no-data {
     position: absolute; inset: 0;
@@ -425,6 +482,9 @@
       <div class="kpi-sub">resets at 00:00</div>
     </div>
   </div>
+
+  <!-- Top Talkers strip -->
+  <div id="top-talkers" class="top-talkers" style="display:none"></div>
 
   <!-- Charts -->
   <div class="charts">
@@ -779,6 +839,7 @@ async function loadData() {
   } catch(e) {
     console.error('loadData', e);
   }
+  loadTopTalkers();
   resetCountdown();
 }
 
@@ -1028,7 +1089,7 @@ function tick() {
   countdown--;
   $('next-refresh').textContent = countdown;
   if (countdown <= 0) {
-    loadData();
+    loadData();   // loadData() also calls loadTopTalkers()
     pollStatus();
     if (activeView === 'summary') loadSummary();
   }
@@ -1147,11 +1208,88 @@ function renderSummaryTable(data) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Top Talkers
+// ─────────────────────────────────────────────────────────────────────────────
+function fmtBpsShort(bps) {
+  if (!bps) return '0';
+  if (bps >= 1e9) return (bps / 1e9).toFixed(1) + 'G';
+  if (bps >= 1e6) return (bps / 1e6).toFixed(1) + 'M';
+  if (bps >= 1e3) return (bps / 1e3).toFixed(0) + 'K';
+  return bps.toFixed(0);
+}
+
+function fmtBytesShort(b) {
+  if (!b) return null;
+  if (b >= 1e12) return (b / 1e12).toFixed(1) + 'T';
+  if (b >= 1e9)  return (b / 1e9).toFixed(2) + 'G';
+  if (b >= 1e6)  return (b / 1e6).toFixed(1) + 'M';
+  if (b >= 1e3)  return (b / 1e3).toFixed(0) + 'K';
+  return b + 'B';
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function renderTopTalkers(d) {
+  const el = $('top-talkers');
+  const talkers = d.talkers || [];
+
+  if (!talkers.length) {
+    el.style.display = 'none';
+    return;
+  }
+
+  el.style.display = 'flex';
+  el.innerHTML = talkers.map(t => {
+    const isTop    = t.address === d.top_ip;
+    const isSecond = !isTop && t.address === d.second_ip;
+    const cls = isTop ? 'talker-card rank-1' : isSecond ? 'talker-card rank-2' : 'talker-card';
+
+    // Show short hostname; fall back to IP
+    const displayName = (t.hostname && t.hostname !== t.address)
+      ? t.hostname.replace(/\..*$/, '')   // strip domain
+      : t.address;
+    const tooltip = t.hostname || t.address;
+
+    const badge = isTop
+      ? '<span class="talker-badge" title="Top bandwidth user">👑</span>'
+      : isSecond
+        ? '<span class="talker-badge" title="2nd place" style="color:var(--muted)">②</span>'
+        : '';
+
+    const bytesHtml = t.bytes_in
+      ? `<span class="t-bytes">📥${fmtBytesShort(t.bytes_in)}</span>`
+      : '';
+
+    return `<div class="${cls}" title="${escHtml(tooltip)}">
+      ${badge}<span class="talker-name">${escHtml(displayName)}</span>
+      <div class="talker-rates">
+        <span class="t-dl">↓${fmtBpsShort(t.rate_bits_in)}</span>
+        <span class="t-ul">↑${fmtBpsShort(t.rate_bits_out)}</span>
+        ${bytesHtml}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function loadTopTalkers() {
+  try {
+    const r = await fetch('/api/top-talkers');
+    if (!r.ok) { $('top-talkers').style.display = 'none'; return; }
+    const d = await r.json();
+    renderTopTalkers(d);
+  } catch(e) {
+    $('top-talkers').style.display = 'none';
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Init
 // ─────────────────────────────────────────────────────────────────────────────
 (async () => {
   await loadConfig();
-  await loadData();
+  await Promise.all([loadData(), loadTopTalkers()]);
   await pollStatus();
   setInterval(tick, 1000);
   setInterval(pollStatus, 15000);

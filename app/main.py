@@ -2,7 +2,9 @@ import asyncio
 import json
 import logging
 import os
+import socket
 import time
+from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -82,6 +84,14 @@ _status: dict = {"ok": None, "error": None, "last_poll": None}
 
 # The actual BSD kernel interface name used for bandwidth (may be auto-resolved)
 _active_interface: str = _config.get("interface", "")
+
+# ── Top-talkers state ─────────────────────────────────────────────────────────
+# DNS cache: ip -> (hostname, expiry_timestamp)
+_dns_cache: dict[str, tuple[str, float]] = {}
+DNS_TTL = 300.0  # 5 minutes
+
+# Per-IP rate history: ip -> deque of (timestamp, combined_rate_bps)
+_talker_history: dict[str, deque] = {}
 
 
 def _make_collector() -> OPNsenseCollector:
@@ -323,6 +333,80 @@ async def api_usage_summary():
             "monthly": now.strftime("%Y-%m"),
             "yearly":  now.strftime("%Y"),
         },
+    }
+
+
+async def _dns_lookup(ip: str) -> str:
+    """Reverse DNS with in-process cache (5-min TTL). Never raises."""
+    now = time.time()
+    cached = _dns_cache.get(ip)
+    if cached and now < cached[1]:
+        return cached[0]
+    try:
+        loop = asyncio.get_event_loop()
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, socket.gethostbyaddr, ip),
+            timeout=2.0,
+        )
+        name = result[0]
+    except Exception:
+        name = ip
+    _dns_cache[ip] = (name, now + DNS_TTL)
+    return name
+
+
+@app.get("/api/top-talkers")
+async def api_top_talkers():
+    """
+    Returns the current top bandwidth users on the active WAN interface.
+    Includes per-host 1-minute rate history to identify sustained top users.
+    """
+    if _collector is None or not _active_interface:
+        return {"talkers": [], "top_ip": None, "second_ip": None}
+
+    try:
+        records = await _collector.get_top_talkers(_active_interface, limit=10)
+    except Exception as exc:
+        logger.warning("Top talkers fetch failed: %s", exc)
+        return {"talkers": [], "top_ip": None, "second_ip": None}
+
+    now = time.time()
+
+    # Update per-host 2-minute rate history
+    for rec in records:
+        ip = rec["address"]
+        if ip not in _talker_history:
+            _talker_history[ip] = deque()
+        dq = _talker_history[ip]
+        dq.append((now, rec["rate_bits_in"] + rec["rate_bits_out"]))
+        while dq and dq[0][0] < now - 120:
+            dq.popleft()
+
+    # Score each host by average combined rate over the last 60 s
+    scores: dict[str, float] = {}
+    for ip, dq in _talker_history.items():
+        window = [(ts, r) for ts, r in dq if ts >= now - 60]
+        if window:
+            scores[ip] = sum(r for _, r in window) / len(window)
+
+    ranked = sorted(scores, key=lambda x: scores[x], reverse=True)
+    top_ip    = ranked[0] if len(ranked) > 0 else None
+    second_ip = ranked[1] if len(ranked) > 1 else None
+
+    # Resolve hostnames for IPs that don't already have one from the API
+    need_resolve = [r["address"] for r in records
+                    if not r["hostname"] or r["hostname"] == r["address"]]
+    if need_resolve:
+        resolved = await asyncio.gather(*[_dns_lookup(ip) for ip in need_resolve])
+        name_map = dict(zip(need_resolve, resolved))
+        for rec in records:
+            if rec["address"] in name_map:
+                rec["hostname"] = name_map[rec["address"]]
+
+    return {
+        "talkers":   records[:5],
+        "top_ip":    top_ip,
+        "second_ip": second_ip,
     }
 
 
