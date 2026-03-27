@@ -415,6 +415,10 @@
           <input id="cfg-iface" type="text" placeholder="Auto-resolved from gateway"/>
         </div>
         <div class="field">
+          <label>Top Talkers Interface <span style="font-weight:400; color:var(--muted)">(optional)</span></label>
+          <input id="cfg-top-if" type="text" placeholder="Auto-discovered (e.g. lan, opt1)"/>
+        </div>
+        <div class="field">
           <label>Poll Interval (seconds)</label>
           <input id="cfg-interval" type="number" min="10" max="3600" placeholder="60"/>
         </div>
@@ -978,8 +982,9 @@ async function loadConfig() {
     $('cfg-key').value      = c.api_key       || '';
     // Don't populate secret (masked on server)
     $('cfg-gw').value       = c.gateway       || '';
-    $('cfg-iface').value    = c.interface     || '';
-    $('cfg-interval').value = c.poll_interval || 60;
+    $('cfg-iface').value    = c.interface              || '';
+    $('cfg-top-if').value   = c.top_talker_interface   || '';
+    $('cfg-interval').value = c.poll_interval          || 60;
     $('cfg-ssl').value      = c.verify_ssl ? 'true' : 'false';
     pollInterval = parseInt(c.poll_interval) || 60;
   } catch(e) { console.error('loadConfig', e); }
@@ -989,8 +994,9 @@ async function saveConfig() {
   const body = {
     host:          $('cfg-host').value.trim(),
     api_key:       $('cfg-key').value.trim(),
-    interface:     $('cfg-iface').value.trim(),
-    gateway:       $('cfg-gw').value.trim(),
+    interface:              $('cfg-iface').value.trim(),
+    top_talker_interface:   $('cfg-top-if').value.trim(),
+    gateway:                $('cfg-gw').value.trim(),
     poll_interval: parseInt($('cfg-interval').value) || 60,
     verify_ssl:    $('cfg-ssl').value === 'true',
   };

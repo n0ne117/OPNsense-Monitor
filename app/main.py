@@ -47,8 +47,11 @@ _DEFAULT_CONFIG: dict = {
     "api_key":      os.environ.get("OPNSENSE_API_KEY",    ""),
     "api_secret":   os.environ.get("OPNSENSE_API_SECRET", ""),
     # Leave empty to auto-resolve from gateway's 'if' field
-    "interface":    os.environ.get("OPNSENSE_INTERFACE",  ""),
-    "gateway":      os.environ.get("OPNSENSE_GATEWAY",    "WAN_DHCP"),
+    "interface":         os.environ.get("OPNSENSE_INTERFACE",        ""),
+    "gateway":           os.environ.get("OPNSENSE_GATEWAY",          "WAN_DHCP"),
+    # Logical OPNsense interface name for traffic/top (e.g. "lan", "opt1").
+    # Leave empty for auto-discovery.
+    "top_talker_interface": os.environ.get("OPNSENSE_TOP_IF", ""),
     "verify_ssl":   os.environ.get("OPNSENSE_VERIFY_SSL", "false").lower() == "true",
     "poll_interval": int(os.environ.get("POLL_INTERVAL", "60")),
 }
@@ -241,13 +244,14 @@ app = FastAPI(title="OPNsense Monitor", lifespan=lifespan)
 # API routes
 # ---------------------------------------------------------------------------
 class ConfigUpdate(BaseModel):
-    host:          Optional[str]  = None
-    api_key:       Optional[str]  = None
-    api_secret:    Optional[str]  = None
-    interface:     Optional[str]  = None
-    gateway:       Optional[str]  = None
-    verify_ssl:    Optional[bool] = None
-    poll_interval: Optional[int]  = None
+    host:                Optional[str]  = None
+    api_key:             Optional[str]  = None
+    api_secret:          Optional[str]  = None
+    interface:           Optional[str]  = None
+    gateway:             Optional[str]  = None
+    top_talker_interface: Optional[str] = None
+    verify_ssl:          Optional[bool] = None
+    poll_interval:       Optional[int]  = None
 
 
 def _safe_config() -> dict:
@@ -347,6 +351,81 @@ async def api_usage_summary():
     }
 
 
+def _is_private_ip(ip: str) -> bool:
+    """Returns True if ip is an RFC1918 private address."""
+    try:
+        p = list(map(int, ip.split(".")))
+        if len(p) != 4:
+            return False
+        return (
+            p[0] == 10
+            or (p[0] == 172 and 16 <= p[1] <= 31)
+            or (p[0] == 192 and p[1] == 168)
+        )
+    except (ValueError, AttributeError):
+        return False
+
+
+async def _discover_top_talker_interface() -> str:
+    """
+    Discovers the correct OPNsense logical interface name for traffic/top by:
+    1. Calling /api/diagnostics/traffic/interface for the list of logical keys
+    2. Probing each key with traffic/top (up to 3 records each)
+    3. Preferring the key whose records include private (RFC1918) IPs — these
+       are the internal hosts whose bandwidth usage we actually want to show
+
+    Caches the result in _top_talker_working_iface.
+    """
+    global _top_talker_working_iface
+
+    if _collector is None:
+        return ""
+
+    try:
+        keys = await _collector.get_traffic_interface_names()
+    except Exception as exc:
+        logger.warning("traffic/interface list failed: %s", exc)
+        return ""
+
+    if not keys:
+        logger.warning("traffic/interface returned no interface keys")
+        return ""
+
+    logger.info("Top-talker interface discovery: probing keys %s", keys)
+
+    best_key = ""
+    best_score = -1  # score: 2=has private IPs, 1=has any records, 0=none
+
+    for key in keys:
+        try:
+            records = await _collector.get_top_talkers(key, limit=3)
+        except Exception as exc:
+            logger.debug("Probe %r failed: %s", key, exc)
+            continue
+
+        if not records:
+            logger.debug("Probe %r: no records", key)
+            continue
+
+        has_private = any(_is_private_ip(r["address"]) for r in records)
+        score = 2 if has_private else 1
+        logger.info("Probe %r: %d records, private_ips=%s", key, len(records), has_private)
+
+        if score > best_score:
+            best_score = score
+            best_key = key
+            if score == 2:
+                break  # private-IP interface found — stop searching
+
+    if best_key:
+        logger.info("Top talkers: auto-discovered interface %r (score=%d)", best_key, best_score)
+        _top_talker_working_iface = best_key
+    else:
+        logger.warning("Top talkers: discovery found no working interface key")
+
+    return best_key
+
+
 async def _dns_lookup(ip: str) -> str:
     """Reverse DNS with in-process cache (5-min TTL). Never raises."""
     now = time.time()
@@ -377,26 +456,27 @@ async def api_top_talkers():
     if _collector is None or not _active_interface:
         return {"talkers": [], "top_ip": None, "second_ip": None}
 
-    # The OPNsense traffic/top API endpoint accepts OPNsense logical interface
-    # names (e.g. "wan", "opt1").  The BSD name (e.g. "ix1") may also work on
-    # some builds and is kept as a fallback.  Once a name returns records we
-    # cache it to avoid redundant probing on subsequent calls.
+    # Build ordered candidate list:
+    #  1. Cached working interface (fast path)
+    #  2. User-configured override
+    #  3. OPN logical name from gateway status (often empty)
+    #  4. BSD name (may work on some OPNsense builds)
     candidates: list[str] = []
-    if _top_talker_working_iface:
-        candidates.append(_top_talker_working_iface)
-    if _active_opn_interface and _active_opn_interface not in candidates:
-        candidates.append(_active_opn_interface)
-    if _active_interface not in candidates:
-        candidates.append(_active_interface)
+    for name in [
+        _top_talker_working_iface,
+        _config.get("top_talker_interface", "").strip(),
+        _active_opn_interface,
+        _active_interface,
+    ]:
+        if name and name not in candidates:
+            candidates.append(name)
 
     records: list[dict] = []
     iface_used = candidates[0] if candidates else _active_interface
+
     for candidate in candidates:
         try:
             result = await _collector.get_top_talkers(candidate, limit=10)
-            logger.debug(
-                "Top talkers probe: iface=%r → %d records", candidate, len(result)
-            )
             if result:
                 records = result
                 iface_used = candidate
@@ -407,11 +487,15 @@ async def api_top_talkers():
         except Exception as exc:
             logger.warning("Top talkers fetch failed (iface=%r): %s", candidate, exc)
 
+    # Nothing worked with known candidates — run full discovery
     if not records:
-        logger.debug(
-            "Top talkers: no records from any candidate %s (opn=%r bsd=%r)",
-            candidates, _active_opn_interface, _active_interface,
-        )
+        discovered = await _discover_top_talker_interface()
+        if discovered:
+            try:
+                records = await _collector.get_top_talkers(discovered, limit=10)
+                iface_used = discovered
+            except Exception as exc:
+                logger.warning("Top talkers discovery fetch failed: %s", exc)
 
     now = time.time()
 
@@ -464,6 +548,32 @@ async def api_debug_iface_stats():
     try:
         raw = await _collector.get_raw_interface_stats()
         return {"raw": raw, "active_interface": _active_interface}
+    except Exception as exc:
+        raise HTTPException(500, str(exc))
+
+
+@app.get("/api/debug/traffic-interfaces")
+async def api_debug_traffic_interfaces():
+    """
+    Returns the raw /api/diagnostics/traffic/interface response from OPNsense.
+    The keys in the 'interfaces' dict are the logical interface names you need
+    to pass to the traffic/top endpoint (e.g. 'wan', 'opt1', 'lan').
+    """
+    if _collector is None:
+        raise HTTPException(503, "Collector not ready")
+    try:
+        async with _collector._client() as c:
+            r = await c.get(f"{_collector.base_url}/api/diagnostics/traffic/interface")
+            data = r.json()
+        return {
+            "http_status":           r.status_code,
+            "interface_keys":        list((data.get("interfaces") or {}).keys()),
+            "raw":                   data,
+            "active_bsd_interface":  _active_interface,
+            "active_opn_interface":  _active_opn_interface,
+            "working_cache":         _top_talker_working_iface,
+            "configured_top_if":     _config.get("top_talker_interface", ""),
+        }
     except Exception as exc:
         raise HTTPException(500, str(exc))
 

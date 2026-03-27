@@ -144,6 +144,18 @@ class OPNsenseCollector:
         ip_matches = [k for k in matches if ip_re.search(k)]
         return ip_matches[0] if ip_matches else matches[0]
 
+    async def get_traffic_interface_names(self) -> list[str]:
+        """
+        Returns the list of interface keys from /api/diagnostics/traffic/interface.
+        These are OPNsense logical interface names (e.g. 'wan', 'opt1', 'lan') —
+        the same names accepted by the /api/diagnostics/traffic/top endpoint.
+        """
+        async with self._client() as c:
+            r = await c.get(f"{self.base_url}/api/diagnostics/traffic/interface")
+            r.raise_for_status()
+            data = r.json()
+        return list((data.get("interfaces") or {}).keys())
+
     async def get_top_talkers_raw(self, interface: str) -> dict:
         """
         Returns the raw OPNsense response for /api/diagnostics/traffic/top/{interface}
