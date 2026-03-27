@@ -644,19 +644,25 @@ async function loadData() {
     const resp = await fetch(`/api/data?hours=${hours}`);
     if (!resp.ok) throw new Error(resp.statusText);
     const d = await resp.json();
-    renderAll(d);
+    renderAll(d, hours);
   } catch(e) {
     console.error('loadData', e);
   }
   resetCountdown();
 }
 
-function renderAll(d) {
-  renderBandwidth(d.bandwidth || []);
+function setXWindow(chart, hours) {
+  const now = Date.now();
+  chart.options.scales.x.min = now - hours * 3600 * 1000;
+  chart.options.scales.x.max = now;
+}
+
+function renderAll(d, hours) {
+  renderBandwidth(d.bandwidth || [], hours);
   renderDailyTotals(d.daily_totals || {});
   allGwData = d.gateways || {};
   renderGatewayTabs();
-  renderGatewayCharts();
+  renderGatewayCharts(hours);
   $('last-update').textContent = 'Last updated: ' + new Date().toLocaleTimeString();
 }
 
@@ -669,7 +675,7 @@ function renderDailyTotals(t) {
   $('kpi-ul-day-unit').textContent = ul.unit;
 }
 
-function renderBandwidth(rows) {
+function renderBandwidth(rows, hours) {
   const hasData = rows.length > 0;
   $('bw-nodata').style.display = hasData ? 'none' : 'flex';
 
@@ -678,6 +684,7 @@ function renderBandwidth(rows) {
 
   bwChart.data.datasets[0].data = dlData;
   bwChart.data.datasets[1].data = ulData;
+  setXWindow(bwChart, hours);
   bwChart.update('none');
 
   if (rows.length > 0) {
@@ -706,13 +713,13 @@ function renderGatewayTabs() {
       const tab = document.createElement('button');
       tab.className = 'gw-tab' + (name === activeGw ? ' active' : '');
       tab.textContent = name;
-      tab.onclick = () => { activeGw = name; renderGatewayTabs(); renderGatewayCharts(); };
+      tab.onclick = () => { activeGw = name; renderGatewayTabs(); renderGatewayCharts(parseFloat($('range-select').value) || 24); };
       container.appendChild(tab);
     });
   });
 }
 
-function renderGatewayCharts() {
+function renderGatewayCharts(hours) {
   const rows = (allGwData[activeGw] || []);
   const hasData = rows.length > 0;
 
@@ -729,10 +736,12 @@ function renderGatewayCharts() {
 
   rttChart.data.datasets[0].data  = rttData;
   rttChart.data.datasets[1].data  = rttdData;
+  setXWindow(rttChart, hours);
   rttChart.update('none');
 
   lossChart.data.datasets[0].data = lossData;
   lossChart.data.datasets[1].data = lostPktData;
+  setXWindow(lossChart, hours);
   lossChart.update('none');
 
   if (rows.length > 0) {
