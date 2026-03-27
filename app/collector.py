@@ -111,31 +111,36 @@ class OPNsenseCollector:
     def _find_stats_key(stats: dict, interface: str) -> Optional[str]:
         """
         OPNsense returns composite stat keys such as:
-          '[Port2_WAN] (ix1) / 203.0.113.10'
-          '[Port2_WAN] (ix1) / aa:bb:cc:dd:ee:ff'
-        Given a BSD interface name like 'ix1', find the best matching key.
-        Prefers the key that contains an IPv4 address (actual routed traffic).
-        Falls back to any key containing the name.
+          '[Port2_WAN] (ix1) / aa:bb:cc:dd:ee:ff'   ← link-layer entry (has byte counters)
+          '[Port2_WAN] (ix1) / 203.0.113.10'         ← address entry   (bytes may be 0)
+        Given a BSD interface name like 'ix1', return the best matching key.
+        Prefers the link-layer (MAC) entry because that always carries the
+        cumulative interface byte totals in BSD netstat output.
         """
-        # Exact match (plain BSD name as key — older OPNsense versions)
+        # Exact match (plain BSD name — older OPNsense versions)
         if interface in stats:
             return interface
 
-        ip_re = re.compile(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}')
+        mac_re = re.compile(r'(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}')
+        ip_re  = re.compile(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}')
 
-        # Keys that contain (interface) or [interface]
+        # Collect all keys that mention this interface name
         matches = [
             k for k in stats
-            if f"({interface})" in k or f"[{interface}]" in k or f"/{interface}" in k
+            if f"({interface})" in k or f"[{interface}]" in k
         ]
         if not matches:
-            # Broad fallback: key contains the name anywhere
             matches = [k for k in stats if interface in k]
 
         if not matches:
             return None
 
-        # Among matches prefer the one with an IPv4 address
+        # Prefer link-layer (MAC) entry — it always has the real byte counters
+        mac_matches = [k for k in matches if mac_re.search(k)]
+        if mac_matches:
+            return mac_matches[0]
+
+        # Fall back to IP-address entry
         ip_matches = [k for k in matches if ip_re.search(k)]
         return ip_matches[0] if ip_matches else matches[0]
 
