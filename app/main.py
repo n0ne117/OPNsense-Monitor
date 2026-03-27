@@ -15,6 +15,8 @@ from collector import OPNsenseCollector
 from database import (
     compute_daily_from_bandwidth,
     compute_hourly_from_bandwidth,
+    compute_monthly_from_daily,
+    compute_yearly_from_monthly,
     get_bandwidth_history,
     get_daily_totals,
     get_gateway_history,
@@ -312,9 +314,9 @@ async def api_usage_summary():
         # Hourly + daily: computed live from the bandwidth table — no warm-up needed
         "hourly":  compute_hourly_from_bandwidth(),
         "daily":   compute_daily_from_bandwidth(),
-        # Monthly + yearly: accumulated persistently; builds up over time
-        "monthly": get_usage_summary("monthly"),
-        "yearly":  get_usage_summary("yearly"),
+        # Monthly + yearly: derived from daily totals — always accurate
+        "monthly": compute_monthly_from_daily(),
+        "yearly":  compute_yearly_from_monthly(),
         "current_keys": {
             "hourly":  now.strftime("%Y-%m-%d %H"),
             "daily":   now.strftime("%Y-%m-%d"),
