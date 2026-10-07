@@ -132,7 +132,7 @@ def update_usage_summary(bytes_in: float, bytes_out: float):
 def compute_hourly_from_bandwidth() -> list[dict]:
     """
     Compute per-hour totals by integrating bps rates stored in the bandwidth
-    table (covers the last 24 h). Works immediately — no warm-up needed.
+    table (covers the last 24 h), merged with persistent hourly records.
     """
     with get_conn() as conn:
         rows = conn.execute(
@@ -152,7 +152,7 @@ def compute_hourly_from_bandwidth() -> list[dict]:
         buckets[key]["bytes_in"]  += bi
         buckets[key]["bytes_out"] += bo
 
-    return sorted(buckets.values(), key=lambda x: x["period_key"], reverse=True)
+    return _merge_with_stored("hourly", buckets)
 
 
 def compute_daily_from_bandwidth() -> list[dict]:
@@ -178,10 +178,24 @@ def compute_daily_from_bandwidth() -> list[dict]:
         recent[key]["bytes_in"]  += bi
         recent[key]["bytes_out"] += bo
 
-    # Merge: stored rows for older days, freshly-computed for recent days
+    return _merge_with_stored("daily", recent)
+
+
+def _merge_with_stored(period_type: str, computed: dict[str, dict]) -> list[dict]:
+    """
+    Merge freshly-computed buckets with persistent usage_summary rows.
+    The bandwidth table only spans 24 h, so its oldest bucket is partial
+    (e.g. yesterday computed from just its last few hours). Stored rows are
+    accumulated from counter deltas and cover the whole period, so per period
+    keep whichever total is larger; computed fills periods with no stored row.
+    """
     merged: dict[str, dict] = {r["period_key"]: dict(r)
-                                for r in get_usage_summary("daily")}
-    merged.update(recent)   # recent always wins
+                                for r in get_usage_summary(period_type)}
+    for key, row in computed.items():
+        stored = merged.get(key)
+        if stored is None or (row["bytes_in"] + row["bytes_out"]
+                              > stored["bytes_in"] + stored["bytes_out"]):
+            merged[key] = row
     return sorted(merged.values(), key=lambda x: x["period_key"], reverse=True)
 
 

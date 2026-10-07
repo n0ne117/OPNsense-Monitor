@@ -482,7 +482,7 @@
       <div class="kpi-value" id="kpi-rttd">—</div>
       <div class="kpi-unit">ms</div>
     </div>
-    <div class="kpi" data-gw style="--kpi-color: #f85149">
+    <div class="kpi" data-gw id="kpi-loss-card" style="--kpi-color: #f85149">
       <div class="kpi-label">Packet Loss</div>
       <div class="kpi-value" id="kpi-loss">—</div>
       <div class="kpi-unit">%</div>
@@ -997,10 +997,7 @@ function renderGatewayCharts(hours) {
     $('kpi-loss-abs').textContent = `≈ ${lostPkts} / ${DPINGER_WINDOW} pkts`;
 
     // Colour KPI card
-    const lossKpi = document.querySelector('[style="--kpi-color: #f85149"]');
-    if (lossKpi) {
-      lossKpi.style.setProperty('--kpi-color', lp === 0 ? '#3fb950' : lp < 5 ? '#d29922' : '#f85149');
-    }
+    $('kpi-loss-card').style.setProperty('--kpi-color', lp === 0 ? '#3fb950' : lp < 5 ? '#d29922' : '#f85149');
 
     // Alert banner
     const rtt = last.rtt_ms ?? 0;
@@ -1192,10 +1189,15 @@ async function loadSummary() {
   } catch(e) { console.error('loadSummary', e); }
 }
 
+// YYYY-MM-DD in local time (matches the server's local-time period keys)
+function localDateKey(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
 function fmtPeriodLabel(type, key) {
   const now   = new Date();
-  const today = now.toISOString().slice(0, 10);
-  const yest  = new Date(now - 86400000).toISOString().slice(0, 10);
+  const today = localDateKey(now);
+  const yest  = localDateKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1));
 
   if (type === 'hourly') {
     const [date, hour] = key.split(' ');
