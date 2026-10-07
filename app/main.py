@@ -541,13 +541,20 @@ async def api_top_talkers():
 
     # Update per-host 2-minute rate history
     for rec in records:
-        ip = rec["address"]
-        if ip not in _talker_history:
-            _talker_history[ip] = deque()
+        _talker_history.setdefault(rec["address"], deque()).append(
+            (now, rec["rate_bits_in"] + rec["rate_bits_out"])
+        )
+    # Prune old samples for every host and forget hosts with none left
+    for ip in list(_talker_history):
         dq = _talker_history[ip]
-        dq.append((now, rec["rate_bits_in"] + rec["rate_bits_out"]))
         while dq and dq[0][0] < now - 120:
             dq.popleft()
+        if not dq:
+            del _talker_history[ip]
+
+    # Drop expired reverse-DNS entries
+    for ip in [ip for ip, (_, exp) in _dns_cache.items() if exp <= now]:
+        del _dns_cache[ip]
 
     # Score each host by average combined rate over the last 60 s
     scores: dict[str, float] = {}

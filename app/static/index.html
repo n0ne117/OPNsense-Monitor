@@ -864,6 +864,12 @@ async function loadData() {
   resetCountdown();
 }
 
+// A sample is stale when it's older than 3 poll intervals (min 5 min) —
+// same threshold the backend uses to detect downtime gaps.
+function isStale(row) {
+  return Date.now() - row.timestamp * 1000 > Math.max(3 * pollInterval, 300) * 1000;
+}
+
 function setXWindow(chart, hours) {
   const now = Date.now();
   chart.options.scales.x.min = now - hours * 3600 * 1000;
@@ -930,15 +936,14 @@ function renderBandwidth(rows, hours) {
   setXWindow(bwChart, hours);
   bwChart.update('none');
 
-  if (rows.length > 0) {
-    const last = rows[rows.length - 1];
-    const dl = fmtBps(last.bps_in);
-    const ul = fmtBps(last.bps_out);
-    $('kpi-dl').textContent      = dl.val;
-    $('kpi-dl-unit').textContent = dl.unit;
-    $('kpi-ul').textContent      = ul.val;
-    $('kpi-ul-unit').textContent = ul.unit;
-  }
+  const last = rows[rows.length - 1];
+  const fresh = last && !isStale(last);
+  const dl = fmtBps(fresh ? last.bps_in  : null);
+  const ul = fmtBps(fresh ? last.bps_out : null);
+  $('kpi-dl').textContent      = dl.val;
+  $('kpi-dl-unit').textContent = dl.unit || 'Mbps';
+  $('kpi-ul').textContent      = ul.val;
+  $('kpi-ul-unit').textContent = ul.unit || 'Mbps';
 }
 
 function renderGatewayTabs() {
@@ -987,31 +992,47 @@ function renderGatewayCharts(hours) {
   setXWindow(lossChart, hours);
   lossChart.update('none');
 
-  if (rows.length > 0) {
-    const last = rows[rows.length - 1];
-    $('kpi-rtt').textContent  = fmtMs(last.rtt_ms);
-    $('kpi-rttd').textContent = fmtMs(last.rttd_ms);
-    const lp = last.loss_pct ?? 0;
-    $('kpi-loss').textContent = lp.toFixed(2);
-    const lostPkts = Math.round((lp / 100) * DPINGER_WINDOW);
-    $('kpi-loss-abs').textContent = `≈ ${lostPkts} / ${DPINGER_WINDOW} pkts`;
-
-    // Colour KPI card
-    $('kpi-loss-card').style.setProperty('--kpi-color', lp === 0 ? '#3fb950' : lp < 5 ? '#d29922' : '#f85149');
-
-    // Alert banner
-    const rtt = last.rtt_ms ?? 0;
-    const banner = $('alert-banner');
-    const isCritical = rtt >= 100 || lp >= 4;
-    const isWarning  = !isCritical && (rtt >= 65 || lp >= 1);
-    banner.className = 'alert-banner' + (isCritical ? ' critical' : isWarning ? ' warning' : '');
-    if (isCritical) {
-      $('alert-icon').textContent = '🔴';
-      $('alert-text').textContent = 'Critical: Internet connection currently very unstable or saturated!';
-    } else if (isWarning) {
+  const last = rows[rows.length - 1];
+  const banner = $('alert-banner');
+  if (!last || isStale(last)) {
+    // No (recent) gateway data — clear KPIs instead of showing old values
+    $('kpi-rtt').textContent      = '—';
+    $('kpi-rttd').textContent     = '—';
+    $('kpi-loss').textContent     = '—';
+    $('kpi-loss-abs').textContent = '';
+    $('kpi-loss-card').style.setProperty('--kpi-color', '#f85149');
+    if (last) {
+      const mins = Math.round((Date.now() - last.timestamp * 1000) / 60000);
+      banner.className = 'alert-banner warning';
       $('alert-icon').textContent = '⚠️';
-      $('alert-text').textContent = 'Warning: Internet connection is currently unstable!';
+      $('alert-text').textContent = `No gateway data for ${mins} min — gateway may be down or polling is failing.`;
+    } else {
+      banner.className = 'alert-banner';
     }
+    return;
+  }
+
+  $('kpi-rtt').textContent  = fmtMs(last.rtt_ms);
+  $('kpi-rttd').textContent = fmtMs(last.rttd_ms);
+  const lp = last.loss_pct ?? 0;
+  $('kpi-loss').textContent = lp.toFixed(2);
+  const lostPkts = Math.round((lp / 100) * DPINGER_WINDOW);
+  $('kpi-loss-abs').textContent = `≈ ${lostPkts} / ${DPINGER_WINDOW} pkts`;
+
+  // Colour KPI card
+  $('kpi-loss-card').style.setProperty('--kpi-color', lp === 0 ? '#3fb950' : lp < 5 ? '#d29922' : '#f85149');
+
+  // Alert banner
+  const rtt = last.rtt_ms ?? 0;
+  const isCritical = rtt >= 100 || lp >= 4;
+  const isWarning  = !isCritical && (rtt >= 65 || lp >= 1);
+  banner.className = 'alert-banner' + (isCritical ? ' critical' : isWarning ? ' warning' : '');
+  if (isCritical) {
+    $('alert-icon').textContent = '🔴';
+    $('alert-text').textContent = 'Critical: Internet connection currently very unstable or saturated!';
+  } else if (isWarning) {
+    $('alert-icon').textContent = '⚠️';
+    $('alert-text').textContent = 'Warning: Internet connection is currently unstable!';
   }
 }
 

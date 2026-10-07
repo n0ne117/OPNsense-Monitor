@@ -239,10 +239,11 @@ class OPNsenseCollector:
         result.sort(key=lambda x: x["rate_bits_in"] + x["rate_bits_out"], reverse=True)
         return result[:limit]
 
-    async def get_bandwidth(self, interface: str) -> Optional[tuple[float, float]]:
+    async def get_bandwidth(self, interface: str) -> Optional[tuple[float, float, float, float]]:
         """
-        Returns (bps_in, bps_out) calculated from cumulative byte counters,
-        or None on the first sample (no previous reading to diff against).
+        Returns (bps_in, bps_out, bytes_in, bytes_out) — rates and byte deltas
+        calculated from cumulative byte counters — or None on the first sample
+        (no previous reading to diff against) or on error.
         """
         try:
             data = await self.get_raw_interface_stats()
