@@ -38,8 +38,8 @@ A lightweight, self-hosted dashboard that polls the OPNsense REST API and displa
 ### 2. Clone and configure
 
 ```bash
-git clone https://github.com/n0ne117/opnsense-api-app.git
-cd opnsense-api-app
+git clone https://github.com/n0ne117/OPNsense-Monitor.git
+cd OPNsense-Monitor
 cp .env.example .env
 ```
 
