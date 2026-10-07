@@ -6,6 +6,7 @@ from contextlib import contextmanager
 
 DB_PATH = os.environ.get("DB_PATH", "/data/monitor.db")
 RETENTION_SECONDS = 86400  # 24 hours
+MAX_GAP_SECONDS = 300.0    # see set_poll_interval()
 
 
 def _ensure_dir():
@@ -129,56 +130,54 @@ def update_usage_summary(bytes_in: float, bytes_out: float):
         conn.commit()
 
 
-def compute_hourly_from_bandwidth() -> list[dict]:
+def set_poll_interval(seconds: float):
+    """Gaps longer than 3 poll intervals (min 5 min) are treated as downtime."""
+    global MAX_GAP_SECONDS
+    MAX_GAP_SECONDS = max(3 * seconds, 300)
+
+
+def _integrate(rows, key_fmt: str) -> dict[str, dict]:
+    """
+    Integrate stored bps rates into byte totals bucketed by strftime(key_fmt).
+    Intervals longer than MAX_GAP_SECONDS (downtime / restart) are skipped so a
+    single rate isn't stretched across the whole outage.
+    """
+    buckets: dict[str, dict] = {}
+    for i in range(1, len(rows)):
+        dt = rows[i]["timestamp"] - rows[i - 1]["timestamp"]
+        if dt <= 0 or dt > MAX_GAP_SECONDS:
+            continue
+        key = datetime.datetime.fromtimestamp(rows[i]["timestamp"]).strftime(key_fmt)
+        if key not in buckets:
+            buckets[key] = {"period_key": key, "bytes_in": 0.0, "bytes_out": 0.0}
+        buckets[key]["bytes_in"]  += rows[i]["bps_in"]  * dt / 8
+        buckets[key]["bytes_out"] += rows[i]["bps_out"] * dt / 8
+    return buckets
+
+
+def _bandwidth_rows(interface: str, since: float = 0):
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT timestamp, bps_in, bps_out FROM bandwidth "
+            "WHERE interface=? AND timestamp>=? ORDER BY timestamp",
+            (interface, since),
+        ).fetchall()
+
+
+def compute_hourly_from_bandwidth(interface: str) -> list[dict]:
     """
     Compute per-hour totals by integrating bps rates stored in the bandwidth
     table (covers the last 24 h), merged with persistent hourly records.
     """
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT timestamp, bps_in, bps_out FROM bandwidth ORDER BY timestamp"
-        ).fetchall()
-
-    buckets: dict[str, dict] = {}
-    for i in range(1, len(rows)):
-        dt = rows[i]["timestamp"] - rows[i - 1]["timestamp"]
-        if dt <= 0 or dt > 7200:   # skip gaps > 2 h (e.g. after restart)
-            continue
-        bi = rows[i]["bps_in"]  * dt / 8
-        bo = rows[i]["bps_out"] * dt / 8
-        key = datetime.datetime.fromtimestamp(rows[i]["timestamp"]).strftime("%Y-%m-%d %H")
-        if key not in buckets:
-            buckets[key] = {"period_key": key, "bytes_in": 0.0, "bytes_out": 0.0}
-        buckets[key]["bytes_in"]  += bi
-        buckets[key]["bytes_out"] += bo
-
-    return _merge_with_stored("hourly", buckets)
+    return _merge_with_stored("hourly", _integrate(_bandwidth_rows(interface), "%Y-%m-%d %H"))
 
 
-def compute_daily_from_bandwidth() -> list[dict]:
+def compute_daily_from_bandwidth(interface: str) -> list[dict]:
     """
     Compute per-day totals from the bandwidth table for recent days,
     merged with the persistent usage_summary for days older than 24 h.
     """
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT timestamp, bps_in, bps_out FROM bandwidth ORDER BY timestamp"
-        ).fetchall()
-
-    recent: dict[str, dict] = {}
-    for i in range(1, len(rows)):
-        dt = rows[i]["timestamp"] - rows[i - 1]["timestamp"]
-        if dt <= 0 or dt > 7200:
-            continue
-        bi = rows[i]["bps_in"]  * dt / 8
-        bo = rows[i]["bps_out"] * dt / 8
-        key = datetime.datetime.fromtimestamp(rows[i]["timestamp"]).strftime("%Y-%m-%d")
-        if key not in recent:
-            recent[key] = {"period_key": key, "bytes_in": 0.0, "bytes_out": 0.0}
-        recent[key]["bytes_in"]  += bi
-        recent[key]["bytes_out"] += bo
-
-    return _merge_with_stored("daily", recent)
+    return _merge_with_stored("daily", _integrate(_bandwidth_rows(interface), "%Y-%m-%d"))
 
 
 def _merge_with_stored(period_type: str, computed: dict[str, dict]) -> list[dict]:
@@ -199,33 +198,31 @@ def _merge_with_stored(period_type: str, computed: dict[str, dict]) -> list[dict
     return sorted(merged.values(), key=lambda x: x["period_key"], reverse=True)
 
 
-def compute_monthly_from_daily() -> list[dict]:
-    """
-    Derive monthly totals by summing all daily records.
-    Uses compute_daily_from_bandwidth() so recent days are always accurate.
-    """
-    monthly: dict[str, dict] = {}
-    for row in compute_daily_from_bandwidth():
-        mk = row["period_key"][:7]          # "2026-03-27" → "2026-03"
-        if mk not in monthly:
-            monthly[mk] = {"period_key": mk, "bytes_in": 0.0, "bytes_out": 0.0}
-        monthly[mk]["bytes_in"]  += row["bytes_in"]
-        monthly[mk]["bytes_out"] += row["bytes_out"]
-    return sorted(monthly.values(), key=lambda x: x["period_key"], reverse=True)
+def _rollup(rows: list[dict], key_len: int) -> dict[str, dict]:
+    """Sum rows into coarser buckets keyed by the first key_len chars of period_key."""
+    out: dict[str, dict] = {}
+    for row in rows:
+        k = row["period_key"][:key_len]
+        if k not in out:
+            out[k] = {"period_key": k, "bytes_in": 0.0, "bytes_out": 0.0}
+        out[k]["bytes_in"]  += row["bytes_in"]
+        out[k]["bytes_out"] += row["bytes_out"]
+    return out
 
 
-def compute_yearly_from_monthly() -> list[dict]:
+def compute_monthly_from_daily(interface: str) -> list[dict]:
     """
-    Derive yearly totals by summing all monthly records.
+    Derive monthly totals by summing daily records, merged with stored monthly
+    rows (daily records are pruned after 365 days; monthly ones are kept longer).
     """
-    yearly: dict[str, dict] = {}
-    for row in compute_monthly_from_daily():
-        yk = row["period_key"][:4]          # "2026-03" → "2026"
-        if yk not in yearly:
-            yearly[yk] = {"period_key": yk, "bytes_in": 0.0, "bytes_out": 0.0}
-        yearly[yk]["bytes_in"]  += row["bytes_in"]
-        yearly[yk]["bytes_out"] += row["bytes_out"]
-    return sorted(yearly.values(), key=lambda x: x["period_key"], reverse=True)
+    return _merge_with_stored("monthly", _rollup(compute_daily_from_bandwidth(interface), 7))
+
+
+def compute_yearly_from_monthly(interface: str) -> list[dict]:
+    """
+    Derive yearly totals by summing monthly records, merged with stored yearly rows.
+    """
+    return _merge_with_stored("yearly", _rollup(compute_monthly_from_daily(interface), 4))
 
 
 def get_usage_summary(period_type: str) -> list[dict]:
@@ -277,23 +274,9 @@ def get_daily_totals(interface: str) -> dict:
     now = datetime.datetime.now()
     midnight = datetime.datetime(now.year, now.month, now.day).timestamp()
 
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT timestamp, bps_in, bps_out FROM bandwidth "
-            "WHERE interface=? AND timestamp>=? ORDER BY timestamp",
-            (interface, midnight),
-        ).fetchall()
-
-    if len(rows) < 2:
-        return {"bytes_in": 0.0, "bytes_out": 0.0, "since": midnight}
-
-    total_in = total_out = 0.0
-    for i in range(1, len(rows)):
-        dt = rows[i]["timestamp"] - rows[i - 1]["timestamp"]
-        total_in  += rows[i]["bps_in"]  * dt / 8
-        total_out += rows[i]["bps_out"] * dt / 8
-
-    return {"bytes_in": total_in, "bytes_out": total_out, "since": midnight}
+    t = _integrate(_bandwidth_rows(interface, midnight), "%Y-%m-%d").get(
+        now.strftime("%Y-%m-%d"), {"bytes_in": 0.0, "bytes_out": 0.0})
+    return {"bytes_in": t["bytes_in"], "bytes_out": t["bytes_out"], "since": midnight}
 
 
 def get_stored_interfaces() -> list[str]:

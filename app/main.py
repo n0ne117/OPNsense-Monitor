@@ -11,7 +11,7 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from collector import OPNsenseCollector
 from database import (
@@ -28,6 +28,7 @@ from database import (
     init_db,
     insert_bandwidth,
     insert_gateway,
+    set_poll_interval,
     update_usage_summary,
 )
 
@@ -152,11 +153,21 @@ def _resolve_interface_from_gateways(gateways: list[dict]) -> str:
 async def _poll_once(col: OPNsenseCollector):
     global _status, _active_interface, _active_opn_interface
 
-    try:
-        # ── 1. Gateway status (RTT / RTTd / loss + interface resolution) ──
-        gateways = await col.get_gateway_status()
+    errors: list[str] = []
+    monitor_gw = _config.get("enable_gateway_monitor", True)
 
-        if _config.get("enable_gateway_monitor", True):
+    # ── 1. Gateway status (RTT / RTTd / loss + interface resolution) ──
+    # Skipped when the monitor is off and the interface is already known,
+    # so disabling it actually spares the firewall this call.
+    if monitor_gw or not _active_interface:
+        try:
+            gateways = await col.get_gateway_status()
+        except Exception as exc:
+            logger.error("Gateway status failed: %s", exc)
+            errors.append(f"gateway status: {exc}")
+            gateways = []
+
+        if monitor_gw:
             target_gw = _config.get("gateway", "")
             for gw in gateways:
                 if gw["rtt_ms"] is not None:
@@ -177,17 +188,20 @@ async def _poll_once(col: OPNsenseCollector):
                         )
 
         # ── 2. Resolve BSD + OPN interface names ────────────────────────────
+        # Keep the previous names if the gateway call failed.
         resolved, resolved_opn = _resolve_interfaces_from_gateways(gateways)
-        if resolved and resolved != _active_interface:
-            logger.info(
-                "Active interface: %r → %r (bsd) / %r (opn)",
-                _active_interface, resolved, resolved_opn,
-            )
-        _active_interface = resolved
-        _active_opn_interface = resolved_opn
+        if resolved:
+            if resolved != _active_interface:
+                logger.info(
+                    "Active interface: %r → %r (bsd) / %r (opn)",
+                    _active_interface, resolved, resolved_opn,
+                )
+            _active_interface = resolved
+            _active_opn_interface = resolved_opn
 
-        # ── 3. Bandwidth ────────────────────────────────────────────────────
-        if _active_interface:
+    # ── 3. Bandwidth ────────────────────────────────────────────────────────
+    if _active_interface:
+        try:
             bw = await col.get_bandwidth(_active_interface)
             if bw is not None:
                 bps_in, bps_out, bytes_in, bytes_out = bw
@@ -197,25 +211,40 @@ async def _poll_once(col: OPNsenseCollector):
                     "BW %s: ↓ %.2f Mbps  ↑ %.2f Mbps",
                     _active_interface, bps_in / 1e6, bps_out / 1e6,
                 )
-        else:
-            logger.warning(
-                "No interface configured and could not auto-resolve from gateways. "
-                "Set 'gateway' in Settings (e.g. Port2_WAN) or specify 'interface' explicitly."
-            )
+        except Exception as exc:
+            logger.error("Bandwidth poll failed: %s", exc)
+            errors.append(f"bandwidth: {exc}")
+    else:
+        logger.warning(
+            "No interface configured and could not auto-resolve from gateways. "
+            "Set 'gateway' in Settings (e.g. Port2_WAN) or specify 'interface' explicitly."
+        )
 
-        _status = {"ok": True, "error": None, "last_poll": time.time()}
-
-    except Exception as exc:
-        logger.error("Poll failed: %s", exc)
-        _status = {"ok": False, "error": str(exc), "last_poll": time.time()}
+    _status = {
+        "ok":        not errors,
+        "error":     "; ".join(errors) or None,
+        "last_poll": time.time(),
+    }
 
 
 async def _poll_loop():
-    global _collector
+    global _collector, _status
     _collector = _make_collector()
     while True:
-        await _poll_once(_collector)
-        await asyncio.sleep(_config.get("poll_interval", 60))
+        try:
+            await _poll_once(_collector)
+        except Exception as exc:
+            logger.error("Poll failed: %s", exc)
+            _status = {"ok": False, "error": str(exc), "last_poll": time.time()}
+        await asyncio.sleep(_poll_interval())
+
+
+def _poll_interval() -> int:
+    """Configured poll interval, clamped so a bad config.json can't hammer the firewall."""
+    try:
+        return min(max(int(_config.get("poll_interval", 60)), 10), 3600)
+    except (TypeError, ValueError):
+        return 60
 
 
 def _restart_poll():
@@ -226,6 +255,7 @@ def _restart_poll():
     _active_interface = _config.get("interface", "")
     _active_opn_interface = ""
     _top_talker_working_iface = ""
+    set_poll_interval(_poll_interval())
     _poll_task = asyncio.create_task(_poll_loop())
 
 
@@ -255,7 +285,7 @@ class ConfigUpdate(BaseModel):
     gateway:                 Optional[str]  = None
     top_talker_interface:    Optional[str]  = None
     verify_ssl:              Optional[bool] = None
-    poll_interval:           Optional[int]  = None
+    poll_interval:           Optional[int]  = Field(None, ge=10, le=3600)
     enable_gateway_monitor:  Optional[bool] = None
     enable_top_talkers:      Optional[bool] = None
 
@@ -341,13 +371,14 @@ async def api_gateways_live():
 async def api_usage_summary():
     import datetime
     now = datetime.datetime.now()
+    iface = _active_interface or _config.get("interface", "")
     return {
-        # Hourly + daily: computed live from the bandwidth table — no warm-up needed
-        "hourly":  compute_hourly_from_bandwidth(),
-        "daily":   compute_daily_from_bandwidth(),
-        # Monthly + yearly: derived from daily totals — always accurate
-        "monthly": compute_monthly_from_daily(),
-        "yearly":  compute_yearly_from_monthly(),
+        # Computed from the active interface's bandwidth rows, merged with
+        # the persistent counter-based totals (see database._merge_with_stored)
+        "hourly":  compute_hourly_from_bandwidth(iface),
+        "daily":   compute_daily_from_bandwidth(iface),
+        "monthly": compute_monthly_from_daily(iface),
+        "yearly":  compute_yearly_from_monthly(iface),
         "current_keys": {
             "hourly":  now.strftime("%Y-%m-%d %H"),
             "daily":   now.strftime("%Y-%m-%d"),
