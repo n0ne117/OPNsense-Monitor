@@ -837,6 +837,64 @@ const lossChart = new Chart(lossCtx, {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Synced hover — hovering one chart shows the tooltip at the same time on the others
+// ─────────────────────────────────────────────────────────────────────────────
+const syncCharts = [bwChart, rttChart, lossChart];
+
+// Index of the sample whose timestamp is closest to ts (data sorted by x)
+function nearestIndex(data, ts) {
+  let lo = 0, hi = data.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (data[mid].x < ts) lo = mid + 1; else hi = mid;
+  }
+  return (lo > 0 && ts - data[lo - 1].x < data[lo].x - ts) ? lo - 1 : lo;
+}
+
+function setSyncedTooltip(chart, ts) {
+  const els = [];
+  if (ts != null) {
+    // Only match samples close to the hovered time (not across gaps)
+    const maxDist = Math.max(2 * pollInterval, 120) * 1000;
+    chart.data.datasets.forEach((ds, datasetIndex) => {
+      if (!ds.data.length) return;
+      const index = nearestIndex(ds.data, ts);
+      const pt = ds.data[index];
+      if (Math.abs(pt.x - ts) <= maxDist && pt.y != null) els.push({ datasetIndex, index });
+    });
+  }
+  const area = chart.chartArea;
+  chart.setActiveElements(els);
+  chart.tooltip.setActiveElements(els, {
+    x: ts != null ? chart.scales.x.getPixelForValue(ts) : 0,
+    y: (area.top + area.bottom) / 2,
+  });
+  chart.update('none');
+}
+
+function syncFrom(source, ts) {
+  syncCharts.forEach(c => {
+    if (c !== source && c.canvas.offsetParent) setSyncedTooltip(c, ts);
+  });
+}
+
+syncCharts.forEach(chart => {
+  let frame = null;
+  chart.canvas.addEventListener('mousemove', e => {
+    if (frame) cancelAnimationFrame(frame);
+    frame = requestAnimationFrame(() => {
+      const area = chart.chartArea;
+      const inside = e.offsetX >= area.left && e.offsetX <= area.right;
+      syncFrom(chart, inside ? chart.scales.x.getValueForPixel(e.offsetX) : null);
+    });
+  });
+  chart.canvas.addEventListener('mouseleave', () => {
+    if (frame) cancelAnimationFrame(frame);
+    syncFrom(chart, null);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // State
 // ─────────────────────────────────────────────────────────────────────────────
 let activeGw = null;
