@@ -12,6 +12,7 @@ A lightweight, self-hosted dashboard that polls the OPNsense REST API and shows 
 - **Top talkers** — the 5 hosts currently using the most bandwidth, with reverse-DNS hostnames; 👑 marks the top user and ② the runner-up, ranked by their average over the last minute
 - **Today's totals** — downloaded / uploaded bytes since midnight
 - **Time ranges** — last 30 min (default), 1 h, 3 h, 6 h, 12 h or 24 h
+- **Synced tooltips** — hovering one chart shows the values at the same time on all charts
 - **Per-gateway tabs** — switch between gateways when more than one is monitored
 
 **Usage summary**
